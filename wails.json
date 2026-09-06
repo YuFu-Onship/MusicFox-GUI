@@ -1,0 +1,21 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "musicfox-gui",
+  "outputfilename": "musicfox-gui",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "",
+  "wailsjsdir": "./frontend/wailsjs",
+  "author": {
+    "name": "MusicFox GUI"
+  },
+  "info": {
+    "companyName": "MusicFox",
+    "productName": "MusicFox GUI",
+    "productVersion": "0.1.0",
+    "copyright": "",
+    "comments": "网易云音乐终端播放器 MusicFox 的桌面图形界面"
+  },
+  "icon": ["build/appicon.png"]
+}
