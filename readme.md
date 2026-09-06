@@ -1,3 +1,19 @@
+<p align="center">
+<img width="256" height="256" alt="music_gui" src="https://github.com/user-attachments/assets/85930c20-452b-4af3-9a7f-4db30074328d" />
+</p>
+
+<h1 align="center">MusicFox GUI</h1>
+
+<p align="center">
+  网易云音乐风格的桌面播放器界面 —— 基于 <a href="https://github.com/go-musicfox/go-musicfox">go-musicfox</a> 的播放内核，使用 <b>Go + Wails</b> 编写
+</p>
+
+<p align="center">
+  <img alt="Go" src="https://img.shields.io/badge/Go-%3E%3D1.26-00ADD8?style=flat-square&logo=go&logoColor=white" />
+  <img alt="Wails" src="https://img.shields.io/badge/Wails-v2-DF4A75?style=flat-square&logo=wails" />
+  <img alt="Platform" src="https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D6?style=flat-square&logo=windows&logoColor=white" />
+  <img alt="AI" src="https://img.shields.io/badge/Vibe%20Coding-DeepSeek%20V4%20Flash%20%2B%20GLM%205.3%20Flash-8A2BE2?style=flat-square" />
+</p>
 
 ## 说明
 
@@ -27,16 +43,6 @@
 - 歌词 / 封面等资源依赖网易云接口，未登录时为游客模式，部分 VIP / 无版权歌曲可能无法播放；
 - 进度跳转仅对 go-mp3 解码的 MP3 精确（与 go-musicfox 行为一致）；
 - 播放顺序 / 随机等为前端逻辑，作用于当前队列；对异常播放地址做了超时预检与自动跳过，尽量保证播放不卡死。
-
-## 快速开始
-
-```bash
-cd gui
-build.bat                 # 或：wails build -skipembedcreate -skipbindings
-# 产物：gui\build\bin\musicfox-gui.exe
-```
-
-更完整的说明、绑定方法与限制见 [`gui/README.md`](gui/README.md)。
 
 ## 相关项目
 
