@@ -28,7 +28,6 @@
 
 - 技术栈：**Go + Wails v2**，前端为原生 HTML / CSS / JS（无 npm 依赖），图标内联自 remix 风格 SVG；
 - 播放内核、数据接口与配置直接复用 go-musicfox（beep 引擎 + 网易云接口）；
-- 界面按项目内 `my_page_*.html` 设计稿实现（暗色 + 网易红 + 4px 圆角 + 歌词活动矩形动画）；
 - 本项目整体由 **AI Vibe Coding** 完成，编写过程中使用的模型为 **DeepSeek V4 Flash** 与 **GLM 5.3 Flash**；
 - 正常运行过程中，内存占用约 **200 MB**。
 
