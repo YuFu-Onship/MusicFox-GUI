@@ -16,10 +16,15 @@
 </p>
 
 ## 界面预览
-<div align="center" style="display: flex; gap: 10px; justify-content: center;">
-  <img src="https://github.com/user-attachments/assets/a11dc576-0794-4d77-9468-3546c402ae8d" width="30%" />
-  <img src="https://github.com/user-attachments/assets/91e3bb45-2a34-437e-80e4-d776067e1ca2" width="30%" />
-  <img src="https://github.com/user-attachments/assets/194c9f51-da10-44be-8dd8-80881973af8f" width="30%" />
+<div align="center">
+  <div style="display: flex; gap: 10px; justify-content: center; margin-bottom: 10px;">
+    <img src="https://github.com/user-attachments/assets/a11dc576-0794-4d77-9468-3546c402ae8d" width="45%" />
+    <img src="https://github.com/user-attachments/assets/91e3bb45-2a34-437e-80e4-d776067e1ca2" width="45%" />
+  </div>
+  <div style="display: flex; gap: 10px; justify-content: center;">
+    <img src="https://github.com/user-attachments/assets/194c9f51-da10-44be-8dd8-80881973af8f" width="45%" />
+    <img src="https://github.com/user-attachments/assets/3c674989-21bc-4d2a-a19a-20ab8384029f" width="45%" />
+  </div>
 </div>
 
 ## 说明
