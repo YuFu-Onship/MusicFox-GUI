@@ -7,7 +7,9 @@ require github.com/go-musicfox/go-musicfox v0.0.0
 replace github.com/go-musicfox/go-musicfox => ./musicfox-core
 
 require (
+	github.com/adrg/xdg v0.5.3
 	github.com/go-musicfox/netease-music v1.6.0
+	github.com/go-ole/go-ole v1.3.0
 	github.com/juju/persistent-cookiejar v1.0.0
 )
 
@@ -17,7 +19,6 @@ require (
 	charm.land/lipgloss/v2 v2.0.4 // indirect
 	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3 // indirect
 	github.com/BurntSushi/toml v1.6.0 // indirect
-	github.com/adrg/xdg v0.5.3 // indirect
 	github.com/anhoder/foxful-cli v1.1.4 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
@@ -27,7 +28,6 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.7 // indirect
 	github.com/ebitengine/purego v0.10.1 // indirect
 	github.com/fhs/gompd/v2 v2.3.0 // indirect
-	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect

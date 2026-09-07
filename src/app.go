@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package app
 
 import (
 	"context"
@@ -13,12 +13,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/adrg/xdg"
 	"github.com/go-musicfox/netease-music/service"
 	neteaseutil "github.com/go-musicfox/netease-music/util"
 	cookiejar "github.com/juju/persistent-cookiejar"
@@ -57,18 +59,26 @@ type PlayerStatus struct {
 	SeekSupported bool     `json:"seekSupported"`
 }
 
-// Settings 本地设置（exe 同目录 setting.json）
+// Settings 本地设置（存 musicfox_gui_data/setting.json）
 type Settings struct {
 	Theme  string `json:"theme"` // dark / light
 	Volume int    `json:"volume"`
+	// BufferMB 歌曲缓冲区大小上限（MB，256~2048），作用于 exe 旁的 musicfox_gui_buffer 目录
+	BufferMB int    `json:"bufferMB"`
+	Quality  string `json:"quality"` // 音质：standard/higher/exhigh/lossless/hires/jyeffect/sky/jymaster，空=跟随内核配置
 }
 
 // LocalState 前端读写视图：设置 + 收藏
-// 设置存 setting.json，收藏存 favorites.csv（均在 exe 同目录）
+// 设置存 setting.json，收藏存 favorites.csv（均在 exe 旁的 musicfox_gui_data 目录）
 type LocalState struct {
 	Theme     string    `json:"theme"` // dark / light
 	Volume    int       `json:"volume"`
+	BufferMB  int       `json:"bufferMB"`
+	Quality   string    `json:"quality"`
 	Favorites []SongDTO `json:"favorites"`
+	// DataDir/BufferDir 仅用于界面提示（实际数据目录，非持久化字段）
+	DataDir   string `json:"dataDir,omitempty"`
+	BufferDir string `json:"bufferDir,omitempty"`
 }
 
 // SessionState 最近一次播放会话（歌单/播放列表续播），存 session.json（exe 同目录）
@@ -93,28 +103,74 @@ type App struct {
 	playMu     sync.Mutex   // 串行下发播放请求：等内核完成切换后再放行下一个，避免请求被丢弃
 	playSeq    atomic.Int64 // 播放请求序号：连续点击时仅最后一次真正生效
 	lastStatus PlayerStatus // 最近一次成功采集的状态快照（内核卡顿时兜底返回）
+
+	smtc *smtcSession // Windows 系统媒体控制栏（SMTC）会话，nil 表示初始化失败/非 Windows
+
+	qualityMu sync.Mutex
+	quality   string // 设置的音质（空=跟随内核配置），有效播放时使用
+	bufferMB  int    // 歌曲缓冲区大小上限（MB）
+
+	bufferStop chan struct{} // 缓冲目录清理协程的停止信号
 }
+
+// 常量目录名：全部运行时文件都收敛在 exe 旁边的这两个目录里
+const (
+	guiDataFolderName   = "musicfox_gui_data"
+	guiBufferFolderName = "musicfox_gui_buffer"
+)
 
 // NewApp 创建后端应用实例并初始化配置/登录态
 func NewApp() *App {
 	// 初始化日志（幂等）
 	slogx.Init()
 
+	ensureLocalDirs()
+	// 旧版文件迁移：exe 旁散落的 setting/favorites/session → musicfox_gui_data；
+	// %AppData%/%LocalAppData% 下 go-musicfox 的 config/cookie → musicfox_gui_data
+	migrateGuiSideFiles()
+	migrateCoreFiles()
+
 	// 加载配置
 	loadConfig()
+	// 把内核缓存目录（beep 歌曲缓冲等）重定向到 exe 旁 musicfox_gui_buffer
+	applyBufferDir()
 
 	// 配置 UNM 等网易云参数
 	applyNeteaseConfig()
 
-	a := &App{songs: make(map[int64]structs.Song), favorites: make(map[int64]structs.Song), session: make(map[int64]structs.Song)}
+	a := &App{
+		songs:      make(map[int64]structs.Song),
+		favorites:  make(map[int64]structs.Song),
+		session:    make(map[int64]structs.Song),
+		bufferMB:   512,
+		bufferStop: make(chan struct{}),
+	}
 	initStateFiles()
 	a.initCookieJar()
 	a.loadFavorites()
 	a.loadSession()
+	a.loadAppliedSettings()
 	return a
 }
 
-func sessionFilePath() string { return filepath.Join(exeDir(), "session.json") }
+// guiDataDir 数据根目录：exe 旁的 musicfox_gui_data
+func guiDataDir() string { return filepath.Join(exeDir(), guiDataFolderName) }
+
+// bufferDir 缓冲目录：exe 旁的 musicfox_gui_buffer（歌曲临时缓存）
+func bufferDir() string { return filepath.Join(exeDir(), guiBufferFolderName) }
+
+func ensureDir(p string) { _ = os.MkdirAll(p, 0o755) }
+
+// ensureLocalDirs 确保两个运行目录存在
+func ensureLocalDirs() {
+	ensureDir(guiDataDir())
+	ensureDir(bufferDir())
+}
+
+func sessionFilePath() string {
+	ensureDir(guiDataDir())
+	return filepath.Join(guiDataDir(), "session.json")
+}
 
 // loadSession 启动时载入最近一次会话队列（用于播放反查与界面续播展示）
 func (a *App) loadSession() {
@@ -187,10 +243,73 @@ func exeDir() string {
 	return filepath.Dir(exe)
 }
 
-func settingsFilePath() string  { return filepath.Join(exeDir(), "setting.json") }
-func favoritesFilePath() string { return filepath.Join(exeDir(), "favorites.csv") }
+func settingsFilePath() string {
+	ensureDir(guiDataDir())
+	return filepath.Join(guiDataDir(), "setting.json")
+}
 
-func defaultSettings() Settings { return Settings{Theme: "dark", Volume: 60} }
+func favoritesFilePath() string {
+	ensureDir(guiDataDir())
+	return filepath.Join(guiDataDir(), "favorites.csv")
+}
+
+func defaultSettings() Settings {
+	return Settings{Theme: "dark", Volume: 60, BufferMB: 512}
+}
+
+// migrateGuiSideFiles 把旧版写在 exe 同目录的 GUI 状态文件移入 musicfox_gui_data
+func migrateGuiSideFiles() {
+	for _, name := range []string{"setting.json", "favorites.csv", "session.json"} {
+		old := filepath.Join(exeDir(), name)
+		if _, err := os.Stat(old); os.IsNotExist(err) {
+			continue
+		}
+		neu := filepath.Join(guiDataDir(), name)
+		if _, err := os.Stat(neu); err == nil {
+			_ = os.Remove(old) // 新位置已有更新的文件，仅清理旧副本
+			continue
+		}
+		if err := os.Rename(old, neu); err != nil {
+			slog.Warn("迁移旧状态文件失败", "name", name, "err", err)
+		} else {
+			slog.Info("已迁移旧状态文件", "name", name)
+		}
+	}
+}
+
+// migrateCoreFiles 把旧版内核（XDG 路径）的 config/cookie 迁入 MUSICFOX_ROOT（musicfox_gui_data）
+func migrateCoreFiles() {
+	oldRoot := filepath.Join(xdg.ConfigHome, types.AppLocalDataDir)
+	oldDataRoot := filepath.Join(xdg.DataHome, types.AppLocalDataDir)
+
+	copyIfMissing := func(src, dst string) {
+		if _, err := os.Stat(dst); err == nil {
+			return
+		}
+		data, err := os.ReadFile(src)
+		if err != nil {
+			return
+		}
+		ensureDir(filepath.Dir(dst))
+		if err := os.WriteFile(dst, data, 0o600); err != nil {
+			slog.Warn("迁移内核文件失败", "src", src, "err", err)
+			return
+		}
+		slog.Info("已迁移内核文件", "src", src)
+	}
+	copyIfMissing(filepath.Join(oldRoot, types.AppTomlFile), mfoxapp.ConfigFilePath())
+	copyIfMissing(filepath.Join(oldDataRoot, "cookie"), filepath.Join(mfoxapp.DataDir(), "cookie"))
+}
+
+// applyBufferDir 把内核的缓存目录（RuntimeDir/CacheDir）重定向到 exe 旁 musicfox_gui_buffer：
+// 便携模式下缓存目录 = filepath.Join(MUSICFOX_ROOT, storage.cache.dir)，
+// 因此填相对路径 ..\musicfox_gui_buffer 即可落到 exe 目录旁的缓冲文件夹。
+func applyBufferDir() {
+	if configs.AppConfig == nil {
+		return
+	}
+	configs.AppConfig.Storage.Cache.Dir = filepath.Join("..", guiBufferFolderName)
+}
 
 // initStateFiles 启动时确保设置/收藏文件存在
 func initStateFiles() {
@@ -214,8 +333,18 @@ func initStateFiles() {
 
 // migrateLegacyState 旧版把设置/收藏存在数据目录 gui_state.json，首次升级时迁移
 func migrateLegacyState() {
-	legacyPath := filepath.Join(mfoxapp.DataDir(), "gui_state.json")
-	if _, err := os.Stat(legacyPath); err != nil {
+	// 兼容：旧 XDG 数据目录 与 便携根内残留
+	legacyPath := ""
+	for _, p := range []string{
+		filepath.Join(xdg.DataHome, types.AppLocalDataDir, "gui_state.json"),
+		filepath.Join(mfoxapp.DataDir(), "gui_state.json"),
+	} {
+		if _, err := os.Stat(p); err == nil {
+			legacyPath = p
+			break
+		}
+	}
+	if legacyPath == "" {
 		return
 	}
 	// 仅当新文件尚未生成时迁移，避免覆盖已有数据
@@ -233,7 +362,7 @@ func migrateLegacyState() {
 		return
 	}
 	if setErr != nil {
-		_ = Settings{Theme: old.Theme, Volume: old.Volume}.save()
+		_ = Settings{Theme: old.Theme, Volume: old.Volume, BufferMB: old.BufferMB, Quality: old.Quality}.save()
 	}
 	if favErr != nil && len(old.Favorites) > 0 {
 		_ = writeFavoritesCSV(old.Favorites)
@@ -253,6 +382,15 @@ func loadSettings() Settings {
 	}
 	if st.Volume > 100 {
 		st.Volume = 100
+	}
+	if st.BufferMB < 256 || st.BufferMB > 2048 {
+		st.BufferMB = 512
+	}
+	q := service.SongQualityLevel(strings.ToLower(strings.TrimSpace(st.Quality)))
+	if !q.IsValid() {
+		st.Quality = ""
+	} else {
+		st.Quality = string(q)
 	}
 	return st
 }
@@ -371,6 +509,7 @@ func (a *App) loadFavorites() {
 // LoadState 读取本地设置与收藏（前端启动/刷新时调用）
 func (a *App) LoadState() (LocalState, error) {
 	st := loadSettings()
+	a.setQualityBuffer(st.Quality, st.BufferMB)
 	favs, err := readFavoritesCSV()
 	if err != nil && !os.IsNotExist(err) {
 		slog.Warn("读取收藏失败", "path", favoritesFilePath(), "err", err)
@@ -384,12 +523,44 @@ func (a *App) LoadState() (LocalState, error) {
 		}
 	}
 	a.mu.Unlock()
-	return LocalState{Theme: st.Theme, Volume: st.Volume, Favorites: favs}, nil
+
+	// 界面默认高亮当前生效音质（未单独设置时跟随内核配置）
+	qualityUI := st.Quality
+	if qualityUI == "" && configs.AppConfig != nil && configs.AppConfig.Player.SongLevel.IsValid() {
+		qualityUI = string(configs.AppConfig.Player.SongLevel)
+	}
+	if qualityUI == "" {
+		qualityUI = string(service.Higher)
+	}
+	return LocalState{
+		Theme:     st.Theme,
+		Volume:    st.Volume,
+		BufferMB:  st.BufferMB,
+		Quality:   qualityUI,
+		Favorites: favs,
+		DataDir:   guiDataDir(),
+		BufferDir: bufferDir(),
+	}, nil
 }
 
 // SaveState 持久化设置（setting.json）与收藏（favorites.csv）
 func (a *App) SaveState(st LocalState) error {
-	if err := (Settings{Theme: st.Theme, Volume: st.Volume}).save(); err != nil {
+	savedQ := strings.ToLower(strings.TrimSpace(st.Quality))
+	if !service.SongQualityLevel(savedQ).IsValid() {
+		savedQ = ""
+	}
+	savedMB := st.BufferMB
+	if savedMB < 256 || savedMB > 2048 {
+		savedMB = 512
+	}
+	a.qualityMu.Lock()
+	if savedQ == "" && a.quality != "" {
+		savedQ = a.quality // 兼容旧前端未携带该字段：保留已有选择
+	}
+	a.qualityMu.Unlock()
+	a.setQualityBuffer(savedQ, savedMB)
+
+	if err := (Settings{Theme: st.Theme, Volume: st.Volume, BufferMB: savedMB, Quality: savedQ}).save(); err != nil {
 		return err
 	}
 	if err := writeFavoritesCSV(st.Favorites); err != nil {
@@ -405,6 +576,27 @@ func (a *App) SaveState(st LocalState) error {
 	}
 	a.mu.Unlock()
 	return nil
+}
+
+// setQualityBuffer 内存中应用 音质/缓冲区大小 设置
+func (a *App) setQualityBuffer(q string, mb int) {
+	a.qualityMu.Lock()
+	if service.SongQualityLevel(q).IsValid() {
+		a.quality = q
+	} else {
+		a.quality = ""
+	}
+	a.qualityMu.Unlock()
+	if mb < 256 || mb > 2048 {
+		mb = 512
+	}
+	a.bufferMB = mb
+}
+
+// loadAppliedSettings 启动后把 setting.json 里的音质/缓冲区应用到内存
+func (a *App) loadAppliedSettings() {
+	st := loadSettings()
+	a.setQualityBuffer(st.Quality, st.BufferMB)
 }
 
 // dtoToStructSong 由持久化 DTO 还原可播放歌曲
@@ -423,10 +615,10 @@ func dtoToStructSong(d SongDTO) structs.Song {
 	return s
 }
 
-// startup Wails 启动回调：初始化音频播放引擎
+// startup Wails 启动回调：初始化音频播放引擎与系统媒体控制会话
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-	// beep 引擎读取全局 configs.AppConfig
+	// beep 引擎读取全局 configs.AppConfig（缓存目录已重定向到 musicfox_gui_buffer）
 	a.player = player.NewBeepPlayer()
 	// 应用持久化的音量（引擎默认满音量，界面读数需要在这里真正生效）
 	if v := loadSettings().Volume; a.player != nil {
@@ -434,16 +626,124 @@ func (a *App) startup(ctx context.Context) {
 		slog.Info("applied saved volume on startup", "volume", v)
 	}
 	slog.Info("beep player started")
+
+	// 缓冲目录大小上限清理
+	a.startBufferJanitor()
+
+	// Windows 系统媒体控制栏（音量/任务栏媒体悬浮条）集成
+	a.smtc = newSMTCSession(a)
+	if a.smtc != nil {
+		a.smtc.start()
+		slog.Info("system media transport session started")
+	} else {
+		slog.Warn("system media transport session unavailable")
+	}
 }
 
 // shutdown Wails 退出回调：保存 cookie 并释放播放器
 func (a *App) shutdown(_ context.Context) {
+	a.stopBufferJanitor()
+	if a.smtc != nil {
+		a.smtc.close()
+		a.smtc = nil
+	}
 	if a.player != nil {
 		a.player.Close()
 	}
 	// 持久化登录态
 	if jar, ok := neteaseutil.GetGlobalCookieJar().(*cookiejar.Jar); ok {
 		_ = jar.Save()
+	}
+}
+
+// startBufferJanitor 周期性清理缓冲目录，使总大小不超过设置的上限
+func (a *App) startBufferJanitor() {
+	if a == nil || a.bufferStop != nil {
+		return
+	}
+	a.bufferStop = make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(8 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-a.bufferStop:
+				return
+			case <-ticker.C:
+				a.cleanBufferIfNeeded()
+			}
+		}
+	}()
+}
+
+func (a *App) stopBufferJanitor() {
+	if a == nil || a.bufferStop == nil {
+		return
+	}
+	close(a.bufferStop)
+	a.bufferStop = nil
+}
+
+func (a *App) bufferLimitBytes() int64 {
+	mb := a.bufferMB
+	if mb < 256 || mb > 2048 {
+		mb = 512
+	}
+	return int64(mb) << 20
+}
+
+// cleanBufferIfNeeded 缓冲目录超过上限时从最旧开始删除（始终保留最新文件，可能是正在播放的临时缓存）
+func (a *App) cleanBufferIfNeeded() {
+	if a == nil {
+		return
+	}
+	entries, err := os.ReadDir(bufferDir())
+	if err != nil {
+		return
+	}
+	type bufFile struct {
+		name string
+		size int64
+	}
+	var files []bufFile
+	var total int64
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, bufFile{name: e.Name(), size: info.Size()})
+		total += info.Size()
+	}
+	limit := a.bufferLimitBytes()
+	if total <= limit || len(files) < 2 {
+		return
+	}
+	// 最旧的先删（目录项按名称排序无意义，按修改时间排一次）
+	slices.SortFunc(files, func(x, y bufFile) int {
+		xi, _ := os.Stat(filepath.Join(bufferDir(), x.name))
+		yi, _ := os.Stat(filepath.Join(bufferDir(), y.name))
+		switch {
+		case xi == nil || yi == nil:
+			return 0
+		case xi.ModTime().Before(yi.ModTime()):
+			return -1
+		case xi.ModTime().After(yi.ModTime()):
+			return 1
+		default:
+			return 0
+		}
+	})
+	for _, fl := range files[:len(files)-1] {
+		if total <= limit {
+			break
+		}
+		if err := os.Remove(filepath.Join(bufferDir(), fl.name)); err == nil {
+			total -= fl.size
+		}
 	}
 }
 
@@ -535,6 +835,14 @@ func (a *App) playable() bool {
 }
 
 func (a *App) effectiveQuality() service.SongQualityLevel {
+	a.qualityMu.Lock()
+	q := a.quality
+	a.qualityMu.Unlock()
+	if q != "" {
+		if lvl := service.SongQualityLevel(q); lvl.IsValid() {
+			return lvl
+		}
+	}
 	if configs.AppConfig != nil && configs.AppConfig.Player.SongLevel.IsValid() {
 		return configs.AppConfig.Player.SongLevel
 	}
@@ -1066,3 +1374,20 @@ func toSongDTO(s structs.Song) SongDTO {
 		Duration: s.Duration.Seconds(),
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 供 main（模块根目录 package main）使用的导出入口：
+// 目录 / 生命周期钩子，避免在 App 上暴露会被 Wails 绑定成前端方法的成员。
+// ---------------------------------------------------------------------------
+
+// RootDataDir 数据根目录（main 在设置 MUSICFOX_ROOT 便携根目录前调用）
+func RootDataDir() string { return guiDataDir() }
+
+// EnsureLocalDirs 创建 exe 旁的数据目录与缓冲目录
+func EnsureLocalDirs() { ensureLocalDirs() }
+
+// StartupHook 返回 App 的 Wails 启动回调（等价于原 app.startup）
+func StartupHook(a *App) func(ctx context.Context) { return a.startup }
+
+// ShutdownHook 返回 App 的 Wails 退出回调（等价于原 app.shutdown）
+func ShutdownHook(a *App) func(ctx context.Context) { return a.shutdown }

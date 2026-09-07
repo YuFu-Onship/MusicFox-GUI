@@ -11,12 +11,19 @@ const els = {
   navSettings: $("navSettings"),
   navThemeIcon: $("navThemeIcon"),
 
+  /* 设置视图 */
+  settingsPanel: $("settingsPanel"),
+  setQualityOpts: $("setQualityOpts"),
+  setBufferOpts: $("setBufferOpts"),
+
   /* 主视图 */
   searchBar: $("searchBar"),
   searchInput: $("searchInput"),
   searchBtn: $("searchBtn"),
   searchClear: $("searchClear"),
-  tagList: $("tagList"),
+  histList: $("histList"),
+  histClear: $("histClear"),
+  histEmpty: $("histEmpty"),
   browseArea: $("browseArea"),
   resultPanel: $("resultPanel"),
   catBar: $("catBar"),
@@ -169,11 +176,11 @@ function toggleTheme() {
 
 els.navTheme.addEventListener("click", () => toggleTheme());
 els.lyricTheme.addEventListener("click", () => toggleTheme());
-els.navSettings.addEventListener("click", () => toast("设置页面开发中"));
+els.navSettings.addEventListener("click", () => showSettingsView());
 
 /* ================= 页面 / 侧栏 =================
-   页面模型：搜索页、收藏页、歌单/专辑详情页三者同级；
-   详情页为独立页面（不显示侧边栏），仅通过顶部返回按钮回到上一页 */
+   页面模型：搜索页、收藏页、设置页、歌单/专辑详情页同级；
+   详情页顶部返回按钮回到打开前的页面 */
 function setActiveNav(el) {
   document
     .querySelectorAll(".nav-item")
@@ -181,18 +188,21 @@ function setActiveNav(el) {
   el.classList.add("active");
 }
 
-/* 记录切到收藏页前搜索区的显示状态，便于返回时还原 */
-let searchUiSaved = null;
+/* 搜索页当前处于 结果(results) 还是 空闲浏览(browse)；
+   回到搜索页时按此状态确定显示，避免搜索栏在页面切换后丢失 */
+let searchMode = "browse";
+
+function isSearchPage() {
+  return (
+    els.favPanel.classList.contains("hidden") &&
+    els.settingsPanel.classList.contains("hidden") &&
+    els.detailPanel.classList.contains("hidden")
+  );
+}
 
 function showFavoritesView() {
   if (!els.favPanel.classList.contains("hidden")) return;
-  searchUiSaved = {
-    searchBar: els.searchBar.classList.contains("hidden"),
-    browse: els.browseArea.classList.contains("hidden"),
-    result: els.resultPanel.classList.contains("hidden"),
-  };
-  /* 详情页为独立页面，正常路径下无法从详情页直达收藏页，这里兜底关闭，
-     并作废未完成的详情加载 */
+  /* 兜底关闭详情页并作废未完成的详情加载 */
   detailToken++;
   detailLoading = false;
   els.detailPanel.classList.add("hidden");
@@ -200,6 +210,7 @@ function showFavoritesView() {
   els.searchBar.classList.add("hidden");
   els.browseArea.classList.add("hidden");
   els.resultPanel.classList.add("hidden");
+  els.settingsPanel.classList.add("hidden");
   exitBatch();
   els.favPanel.classList.remove("hidden");
   renderFavorites();
@@ -207,31 +218,57 @@ function showFavoritesView() {
 }
 
 function showSearchView() {
-  if (els.favPanel.classList.contains("hidden")) return;
+  if (isSearchPage()) return; // 已在搜索页
   els.favPanel.classList.add("hidden");
+  els.settingsPanel.classList.add("hidden");
   els.detailPanel.classList.add("hidden");
   document.body.classList.remove("detail-open");
   exitBatch();
-  const s = searchUiSaved || {};
-  els.searchBar.classList.toggle("hidden", !!s.searchBar);
-  els.browseArea.classList.toggle("hidden", !!s.browse);
-  els.resultPanel.classList.toggle("hidden", !!s.result);
-  const noneShown =
-    els.browseArea.classList.contains("hidden") &&
-    els.resultPanel.classList.contains("hidden");
-  if (noneShown) els.browseArea.classList.remove("hidden");
+  applySearchView();
   setActiveNav(els.navSearch);
+}
+
+/* 按当前模式呈现搜索页：搜索栏始终可见 */
+function applySearchView() {
+  els.searchBar.classList.remove("hidden");
+  if (searchMode === "results" && curItems.length) {
+    els.browseArea.classList.add("hidden");
+    els.resultPanel.classList.remove("hidden");
+    markPlayingRow(lastActiveId);
+    syncFavBtns();
+    return;
+  }
+  searchMode = "browse";
+  els.resultPanel.classList.add("hidden");
+  els.browseArea.classList.remove("hidden");
+  renderHistory();
 }
 
 function showBrowseIdle() {
   els.favPanel.classList.add("hidden");
+  els.settingsPanel.classList.add("hidden");
   els.detailPanel.classList.add("hidden");
   document.body.classList.remove("detail-open");
-  els.searchBar.classList.remove("hidden");
-  els.browseArea.classList.remove("hidden");
-  els.resultPanel.classList.add("hidden");
-  searchUiSaved = null;
+  searchMode = "browse";
+  applySearchView();
   setActiveNav(els.navSearch);
+}
+
+/* 设置页：同级独立视图（保留侧边栏） */
+function showSettingsView() {
+  if (!els.settingsPanel.classList.contains("hidden")) return;
+  detailToken++;
+  detailLoading = false;
+  els.detailPanel.classList.add("hidden");
+  document.body.classList.remove("detail-open");
+  els.favPanel.classList.add("hidden");
+  els.searchBar.classList.add("hidden");
+  els.browseArea.classList.add("hidden");
+  els.resultPanel.classList.add("hidden");
+  exitBatch();
+  els.settingsPanel.classList.remove("hidden");
+  paintSettingsOpts();
+  setActiveNav(els.navSettings);
 }
 
 els.navFav.addEventListener("click", () => showFavoritesView());
@@ -243,6 +280,7 @@ els.navSearch.addEventListener("click", () => {
 });
 
 function showResults() {
+  searchMode = "results";
   els.browseArea.classList.add("hidden");
   els.resultPanel.classList.remove("hidden");
 }
@@ -299,7 +337,7 @@ function switchCat(cat, needFetch) {
   if (cat === curCat && !needFetch) return;
   curCat = cat;
   els.catBar
-    .querySelectorAll(".cat-btn")
+    .querySelectorAll(".tab-item")
     .forEach((b) => b.classList.toggle("active", b.dataset.cat === cat));
   if (needFetch && curKeyword) {
     if (shownKey() !== lastShownKey) doSearch(curKeyword, cat);
@@ -309,9 +347,9 @@ function switchCat(cat, needFetch) {
 }
 
 els.catBar.addEventListener("click", (e) => {
-  const btn = e.target.closest(".cat-btn");
-  if (!btn) return;
-  switchCat(btn.dataset.cat, true);
+  const tab = e.target.closest(".tab-item[data-cat]");
+  if (!tab) return;
+  switchCat(tab.dataset.cat, true);
 });
 
 /* 滚动到底部自动加载下一页（代替显式按钮） */
@@ -390,7 +428,10 @@ function buildRow(item, cat, idx) {
     dur.textContent = fmtTime(item.duration);
     row.append(idxCell, title, artist, dur);
     attachHeart(row, item, "song");
-    row.addEventListener("click", () => playSong(item.id, item.name));
+    row.addEventListener("click", () => {
+      anchorRandomPick(item.id, false);
+      playSong(item.id, item.name);
+    });
   } else {
     row.className = "track-row list";
     row.dataset.id = String(item.id);
@@ -452,6 +493,7 @@ async function doSearch(keyword, cat) {
       }));
     }
     updateQueue();
+    addHistory(kw);
     const label = CATS.find((c) => c.key === curCat)?.label || "";
     if (!curItems.length) {
       showEmpty(`没有找到相关${label}`, "换个关键词试试吧");
@@ -482,10 +524,75 @@ els.searchClear.addEventListener("click", () => {
   showBrowseIdle();
   els.searchInput.focus();
 });
-els.tagList.addEventListener("click", (e) => {
-  const tag = e.target.closest(".tag");
-  if (!tag) return;
-  doSearch(tag.dataset.kw, "song");
+
+/* ================= 历史搜索（localStorage，最多 20 条，最新在前） ================= */
+const HIST_KEY = "musicfox-search-history";
+let searchHistory = [];
+
+function loadHistory() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(HIST_KEY) || "[]");
+    searchHistory = Array.isArray(arr) ? arr.map(String).filter(Boolean) : [];
+  } catch (_) {
+    searchHistory = [];
+  }
+  // 去重并保留顺序
+  searchHistory = searchHistory
+    .filter((k, i) => searchHistory.indexOf(k) === i)
+    .slice(0, 20);
+}
+
+function saveHistory() {
+  try {
+    localStorage.setItem(HIST_KEY, JSON.stringify(searchHistory));
+  } catch (_) {}
+}
+
+function renderHistory() {
+  loadHistory();
+  if (!els.histList) return;
+  els.histList.innerHTML = "";
+  els.histEmpty.classList.toggle("hidden", searchHistory.length > 0);
+  els.histClear.classList.toggle("hidden", searchHistory.length === 0);
+  searchHistory.forEach((kw) => {
+    const tag = document.createElement("div");
+    tag.className = "tag";
+    const text = document.createElement("span");
+    text.textContent = kw;
+    text.title = kw;
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "tag-x";
+    x.title = "删除该记录";
+    x.innerHTML =
+      '<svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>';
+    tag.append(text, x);
+    tag.addEventListener("click", () => doSearch(kw, "song"));
+    x.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      searchHistory = searchHistory.filter((h) => h !== kw);
+      saveHistory();
+      renderHistory();
+    });
+    els.histList.appendChild(tag);
+  });
+}
+
+function addHistory(kw) {
+  const key = String(kw || "").trim();
+  if (!key) return;
+  if (searchHistory[0] === key) return; // 已是最近一条，无需重复
+  searchHistory = [key]
+    .concat(searchHistory.filter((h) => h !== key))
+    .slice(0, 20);
+  saveHistory();
+}
+
+els.histClear.addEventListener("click", () => {
+  searchHistory = [];
+  saveHistory();
+  renderHistory();
+  toast("已清空搜索历史");
 });
 
 /* ================= 收藏（歌曲/歌单/专辑，持久化到 favorites.csv） ================= */
@@ -663,6 +770,7 @@ function renderFavorites() {
       } else if (isSong) {
         songPool = favorites.filter((f) => favType(f) === "song");
         updateQueue();
+        anchorRandomPick(s.id, false);
         playSong(s.id, s.name);
       } else {
         openDetail(favType(s), {
@@ -715,6 +823,7 @@ els.favPlaySel.addEventListener("click", () => {
   }
   songPool = picked;
   updateQueue();
+  anchorRandomPick(picked[0].id, true);
   playSong(picked[0].id, picked[0].name, true);
 });
 els.favRemoveSel.addEventListener("click", () => {
@@ -749,17 +858,72 @@ function scheduleLocalSave() {
   persistFavs();
 }
 function persistLocal() {
-  const state = { theme: isDarkTheme() ? "dark" : "light", volume, favorites };
+  const state = {
+    theme: isDarkTheme() ? "dark" : "light",
+    volume,
+    favorites,
+    bufferMB: bufMB,
+    quality: qualitySel,
+  };
   if (go) {
     try {
       go.SaveState(state);
     } catch (_) {}
   } else {
     try {
-      localStorage.setItem("musicfox-fav", JSON.stringify(favorites));
+      localStorage.setItem("musicfox-fav", JSON.stringify(state));
     } catch (_) {}
   }
 }
+
+/* ================= 设置页（歌曲音质 / 缓冲区大小） ================= */
+const QUALITY_LABELS = {
+  standard: "标准",
+  higher: "较高",
+  exhigh: "极高",
+};
+const BUFFER_CHOICES = [256, 512, 1024, 2048];
+
+let qualitySel = "higher"; // 音质 key（standard/higher/exhigh）
+let bufMB = 512; // 缓冲区大小上限（MB）
+
+function paintSettingsOpts() {
+  if (!els.setQualityOpts) return;
+  els.setQualityOpts
+    .querySelectorAll(".opt-pill")
+    .forEach((b) => b.classList.toggle("active", b.dataset.q === qualitySel));
+  els.setBufferOpts
+    .querySelectorAll(".opt-pill")
+    .forEach((b) => b.classList.toggle("active", Number(b.dataset.mb) === bufMB));
+}
+
+function applyQuality(q) {
+  if (!QUALITY_LABELS[q]) return;
+  qualitySel = q;
+  paintSettingsOpts();
+  persistLocal();
+  toast(`歌曲音质已切换为「${QUALITY_LABELS[q]}」，对之后播放的歌曲生效`);
+}
+
+function applyBuffer(mb) {
+  mb = Number(mb);
+  if (BUFFER_CHOICES.indexOf(mb) < 0) return;
+  bufMB = mb;
+  paintSettingsOpts();
+  persistLocal();
+  toast(
+    `歌曲缓冲区上限已设为 ${mb >= 1024 ? mb / 1024 + " GB" : mb + " MB"}`,
+  );
+}
+
+els.setQualityOpts.addEventListener("click", (e) => {
+  const b = e.target.closest(".opt-pill[data-q]");
+  if (b) applyQuality(b.dataset.q);
+});
+els.setBufferOpts.addEventListener("click", (e) => {
+  const b = e.target.closest(".opt-pill[data-mb]");
+  if (b) applyBuffer(b.dataset.mb);
+});
 
 /* ================= 会话续播（记录最近一次播放的列表/歌单队列） ================= */
 let resumeReady = false; // 启动时存在上次会话：点播放按钮续播
@@ -858,6 +1022,7 @@ async function resumePlay() {
   resumeSeekPos = 0;
   paintPlayIcon(true);
   uiPlaying = true;
+  anchorRandomPick(id, true);
   await playSong(id, name, true);
   if (pos > 3) {
     setTimeout(async () => {
@@ -885,6 +1050,28 @@ function markPlayingRow(id) {
     if (row && (!row.dataset.key || row.dataset.key.startsWith("song:")))
       row.classList.add("playing");
   });
+  /* 切歌后把当前可见列表自动滚动到高亮行（歌单/专辑/搜索/收藏页都适用） */
+  revealPlayingRow(id);
+}
+
+/* 把可见列表滚动到当前播放行，让其在可视区居中；避免自动切歌后行在屏幕外 */
+function revealPlayingRow(id) {
+  if (id == null) return;
+  const lists = [els.trackList, els.detailList, els.favList];
+  for (const el of lists) {
+    if (!el || el.closest(".hidden") != null) continue;
+    const row = el.querySelector(".playing");
+    if (!row || !row.isConnected) continue;
+    const containerTop = el.getBoundingClientRect().top;
+    const containerH = el.clientHeight;
+    const rowTop = row.getBoundingClientRect().top;
+    const rowH = row.getBoundingClientRect().height || 30;
+    const target = Math.round(el.scrollTop + (rowTop - containerTop) - (containerH - rowH) / 2);
+    const max = el.scrollHeight - containerH;
+    const clamped = Math.min(Math.max(target, 0), Math.max(max, 0));
+    if (Math.abs(el.scrollTop - clamped) > 2) el.scrollTop = clamped;
+    return; // 每次只滚动当前可见的那一个列表
+  }
 }
 
 /* ================= 播放 ================= */
@@ -960,7 +1147,13 @@ function autoSkip(failedId) {
     return;
   }
   const idx = songPool.findIndex((x) => x.id === failedId);
-  const next = songPool[(idx + 1) % songPool.length];
+  let next = null;
+  if (randomMode && songPool.length > 1) {
+    next = randomNeighborIdx(1, idx >= 0 ? idx : 0);
+    if (next != null) next = songPool[next];
+  } else if (idx >= 0) {
+    next = songPool[(idx + 1) % songPool.length];
+  }
   if (!next || next.id === failedId) {
     skipChain = 0;
     return;
@@ -999,6 +1192,14 @@ function playNeighbor(delta) {
   if (!songPool.length) return;
   let idx = songPool.findIndex((s) => s.id === lastActiveId);
   if (idx < 0) idx = 0;
+  /* 随机播放模式下沿洗牌序列前进/回退，而非固定 ±1 */
+  if (randomMode && songPool.length > 1) {
+    const nxt = randomNeighborIdx(delta, idx);
+    if (nxt != null) {
+      playAt(nxt, true);
+      return;
+    }
+  }
   const next = idx + delta;
   if (next < 0 || next >= songPool.length) return;
   playSong(songPool[next].id, songPool[next].name);
@@ -1006,6 +1207,153 @@ function playNeighbor(delta) {
 
 let randomMode = false;
 let singleLoop = false;
+
+/* ---- 随机播放（洗牌序列） ----
+   随机开启时维护一个整表的随机播放顺序：当前曲位于 shuffleSeq[shufflePos]，
+   下一首/自动续播沿序列前进，上一首沿历史回退；一轮放完自动重洗继续，
+   与顺序模式一样作用于整个播放列表（歌单/专辑/收藏/搜索结果均适用）。 */
+let shuffleSeq = null; // number[]：songPool 下标组成的随机播放顺序
+let shufflePos = -1; // 当前曲在 shuffleSeq 中的位置
+let shuffleHistory = []; // 随机模式下已跳过的曲目下标（最近的在末尾，用于上一首）
+
+function shuffleIndices(n) {
+  const arr = Array.from({ length: n }, (_, i) => i);
+  for (let i = n - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const t = arr[i];
+    arr[i] = arr[j];
+    arr[j] = t;
+  }
+  return arr;
+}
+
+/* 歌单里可能同一首歌出现多次：洗牌后避免相邻两项是同曲（会显得“随机重了”） */
+function avoidAdjacentSameId(seq) {
+  const n = seq.length;
+  for (let k = 0; k < n - 1; k++) {
+    const id = songPool[seq[k]] && songPool[seq[k]].id;
+    if (!id || (songPool[seq[k + 1]] && songPool[seq[k + 1]].id !== id)) {
+      continue;
+    }
+    for (let m = k + 2; m < n; m++) {
+      if (!songPool[seq[m]] || songPool[seq[m]].id !== id) {
+        const t = seq[k + 1];
+        seq[k + 1] = seq[m];
+        seq[m] = t;
+        break;
+      }
+    }
+  }
+  return seq;
+}
+
+function poolIndexOf(id) {
+  if (id == null) return -1;
+  return songPool.findIndex((s) => s.id === id);
+}
+
+function clearShuffleState() {
+  shuffleSeq = null;
+  shufflePos = -1;
+  shuffleHistory = [];
+}
+
+/* 随机模式下把 poolIdx 这首歌作为当前曲并重新洗牌（手动点歌/换列表/刚开启随机时） */
+function anchorShuffleAt(poolIdx) {
+  const n = songPool.length;
+  if (n <= 1 || poolIdx < 0 || poolIdx >= n) {
+    clearShuffleState();
+    return;
+  }
+  const seq = avoidAdjacentSameId(shuffleIndices(n));
+  const p = seq.indexOf(poolIdx);
+  if (p > 0) {
+    seq[p] = seq[0];
+    seq[0] = poolIdx;
+    avoidAdjacentSameId(seq); // 首曲固定后重查一遍相邻同曲
+  }
+  shuffleSeq = seq;
+  shufflePos = 0;
+  shuffleHistory = [];
+}
+
+/* 确保随机序列与当前队列长度一致；不一致时以当前曲为起点重建 */
+function ensureShuffleReady() {
+  if (!randomMode) return;
+  const n = songPool.length;
+  if (n <= 1) {
+    clearShuffleState();
+    return;
+  }
+  if (
+    shuffleSeq &&
+    shuffleSeq.length === n &&
+    shufflePos >= 0 &&
+    shufflePos < n &&
+    shuffleSeq[shufflePos] >= 0 &&
+    shuffleSeq[shufflePos] < n
+  ) {
+    return;
+  }
+  anchorShuffleAt(poolIndexOf(lastActiveId));
+}
+
+/* 随机模式下从当前曲向前/向后取下一首的下标；返回 null 表示不可切 */
+function randomNeighborIdx(dir, curPoolIdx) {
+  const n = songPool.length;
+  if (n <= 1) return null;
+  ensureShuffleReady();
+  if (!shuffleSeq) return null;
+  if (curPoolIdx >= 0 && shuffleSeq[shufflePos] !== curPoolIdx) {
+    const p = shuffleSeq.indexOf(curPoolIdx);
+    if (p >= 0) shufflePos = p;
+  }
+  if (dir > 0) {
+    shuffleHistory.push(shuffleSeq[shufflePos]);
+    if (shuffleHistory.length > 128) shuffleHistory.shift();
+    let pos = shufflePos + 1;
+    if (pos >= n) {
+      // 一轮放完：重洗开启新的一轮，避免紧接着重复刚播完的这首
+      const lastIdx = shuffleSeq[shufflePos];
+      const lastId = songPool[lastIdx] && songPool[lastIdx].id;
+      shuffleSeq = avoidAdjacentSameId(shuffleIndices(n));
+      if (lastId != null && n > 1 && songPool[shuffleSeq[0]] && songPool[shuffleSeq[0]].id === lastId) {
+        for (let m = 1; m < n; m++) {
+          if (!songPool[shuffleSeq[m]] || songPool[shuffleSeq[m]].id !== lastId) {
+            const t = shuffleSeq[0];
+            shuffleSeq[0] = shuffleSeq[m];
+            shuffleSeq[m] = t;
+            break;
+          }
+        }
+        avoidAdjacentSameId(shuffleSeq);
+      }
+      pos = 0;
+    }
+    shufflePos = pos;
+    return shuffleSeq[pos];
+  }
+  // dir < 0：优先回退已播历史
+  if (shuffleHistory.length) {
+    const target = shuffleHistory.pop();
+    const p = shuffleSeq.indexOf(target);
+    if (p >= 0) {
+      shufflePos = p;
+      return target;
+    }
+    anchorShuffleAt(target);
+    return target;
+  }
+  return null; // 本轮开头，无可回退
+}
+
+/* 手动选择某首歌开播时，让随机序列以其为新起点（当前曲不重复播放） */
+function anchorRandomPick(id, force) {
+  if (!randomMode) return;
+  if (!force && curSongId && id === curSongId) return;
+  const poolIdx = poolIndexOf(id);
+  if (poolIdx >= 0) anchorShuffleAt(poolIdx);
+}
 
 /* 底部控制栏：先应用按钮状态/图标，再执行逻辑（避免等后端动作完成才反馈） */
 function pressFx(btn) {
@@ -1034,6 +1382,13 @@ function paintMode() {
 els.modeBtn.addEventListener("click", (e) => {
   randomMode = !randomMode;
   paintMode(); // 图标立即切换
+  if (randomMode) {
+    // 开启随机：以当前曲为起点生成随机播放顺序
+    const curPoolIdx = poolIndexOf(lastActiveId);
+    if (curPoolIdx >= 0) anchorShuffleAt(curPoolIdx);
+  } else {
+    clearShuffleState();
+  }
   persistSessionNow(sessionLivePos);
   pressFx(els.modeBtn);
   e.preventDefault?.();
@@ -1054,9 +1409,8 @@ function autoAdvance() {
   if (singleLoop) {
     playAt(idx, true);
   } else if (randomMode && n > 1) {
-    let r = idx;
-    while (r === idx) r = Math.floor(Math.random() * n);
-    playAt(r, true);
+    const nxt = randomNeighborIdx(1, idx);
+    if (nxt != null) playAt(nxt, true);
   } else {
     playAt((idx + 1) % n, true);
   }
@@ -1121,6 +1475,7 @@ function renderQueue() {
 
     item.append(title, artist);
     item.addEventListener("click", () => {
+      anchorRandomPick(s.id, false);
       playSong(s.id, s.name);
       closePops();
     });
@@ -1691,6 +2046,11 @@ let DEMO = false;
 
 async function waitForGo() {
   for (let i = 0; i < 30; i++) {
+    if (window.go && window.go.app && window.go.app.App) {
+      go = window.go.app.App;
+      return true;
+    }
+    // 兼容旧命名空间
     if (window.go && window.go.main && window.go.main.App) {
       go = window.go.main.App;
       return true;
@@ -1853,7 +2213,10 @@ function renderDetailList(songs) {
     dur.textContent = fmtTime(s.duration);
     row.append(idx, name, artist, dur);
     attachHeart(row, s, "song");
-    row.addEventListener("click", () => playSong(s.id, s.name));
+    row.addEventListener("click", () => {
+      anchorRandomPick(s.id, false);
+      playSong(s.id, s.name);
+    });
     els.detailList.appendChild(row);
   });
   syncFavBtns();
@@ -1882,13 +2245,8 @@ function closeDetail() {
     renderFavorites();
     setActiveNav(els.navFav);
   } else {
-    els.searchBar.classList.remove("hidden");
-    if (curItems.length) {
-      showResults();
-      slideResults(true);
-    } else {
-      els.browseArea.classList.remove("hidden");
-    }
+    applySearchView();
+    if (searchMode === "results") slideResults(true);
     setActiveNav(els.navSearch);
   }
 }
@@ -1950,11 +2308,15 @@ els.detailFav.addEventListener("click", () => {
   paintDetailFav();
 });
 
-/* Esc：先关歌词页，再关详情页 */
+/* Esc：先关歌词页，再关详情页/设置页 */
 window.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (lyricsOpen) {
     setLyricsOpen(false);
+    return;
+  }
+  if (!els.settingsPanel.classList.contains("hidden")) {
+    showSearchView();
     return;
   }
   closeDetail();
@@ -1969,6 +2331,7 @@ els.detailPlayAll.addEventListener("click", () => {
     randomMode && songPool.length > 1
       ? Math.floor(Math.random() * songPool.length)
       : 0;
+  if (randomMode) anchorShuffleAt(start);
   playAt(start, true);
 });
 
@@ -2122,11 +2485,22 @@ async function tickDemo() {
     try {
       const saved = localStorage.getItem("musicfox-fav");
       if (saved) {
-        const arr = JSON.parse(saved);
-        if (Array.isArray(arr))
-          favorites = arr
+        const val = JSON.parse(saved);
+        /* 兼容：旧版直接存收藏数组，新版存 {favorites, bufferMB, quality} */
+        if (Array.isArray(val)) {
+          favorites = val
             .filter((f) => f && f.id)
             .map((f) => ({ ...f, type: f.type || "song" }));
+        } else {
+          if (Array.isArray(val.favorites))
+            favorites = val.favorites
+              .filter((f) => f && f.id)
+              .map((f) => ({ ...f, type: f.type || "song" }));
+          if (typeof val.bufferMB === "number" && BUFFER_CHOICES.indexOf(Number(val.bufferMB)) >= 0)
+            bufMB = Number(val.bufferMB);
+          if (QUALITY_LABELS[val.quality]) qualitySel = val.quality;
+          else qualitySel = "higher";
+        }
       }
     } catch (_) {}
     updateFavCount();
@@ -2137,6 +2511,7 @@ async function tickDemo() {
         applySavedSession(sess);
     } catch (_) {}
     if (!resumeReady) startDemo();
+    renderHistory();
     setInterval(tickDemo, 400);
     return;
   }
@@ -2145,6 +2520,15 @@ async function tickDemo() {
       applyStatus(await go.Status());
     } catch (_) {}
   }, 400);
+
+  /* Windows 系统媒体控制栏（SMTC）的“上一首/下一首”回调：
+     与底部按钮同路径，自动遵循随机/循环模式 */
+  try {
+    if (window.runtime && window.runtime.EventsOn) {
+      window.runtime.EventsOn("smtc:next", () => playNeighbor(1));
+      window.runtime.EventsOn("smtc:prev", () => playNeighbor(-1));
+    }
+  } catch (_) {}
 
   /* 读取本地设置与收藏 */
   try {
@@ -2170,6 +2554,10 @@ async function tickDemo() {
       favorites = ls.favorites
         .filter((f) => f && f.id)
         .map((f) => ({ ...f, type: f.type || "song" }));
+    if (ls && BUFFER_CHOICES.indexOf(Number(ls.bufferMB)) >= 0) bufMB = Number(ls.bufferMB);
+    if (ls && QUALITY_LABELS[ls.quality]) qualitySel = ls.quality;
+    else if (ls) qualitySel = "higher";
+    paintSettingsOpts();
     updateFavCount();
   } catch (_) {}
 
@@ -2178,6 +2566,7 @@ async function tickDemo() {
     applySavedSession(await go.LoadSession());
   } catch (_) {}
 
+  renderHistory();
   els.searchInput.focus();
 })();
 

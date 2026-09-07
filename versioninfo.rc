@@ -1,0 +1,27 @@
+1 VERSIONINFO
+ FILEVERSION 0,1,0,0
+ PRODUCTVERSION 0,1,0,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904B0"
+  BEGIN
+   VALUE "CompanyName", "GoMusicFox"
+   VALUE "FileDescription", "MusicFox GUI"
+   VALUE "FileVersion", "0.1.0"
+   VALUE "InternalName", "musicfox-gui"
+   VALUE "OriginalFilename", "musicfox-gui.exe"
+   VALUE "ProductName", "MusicFox GUI"
+   VALUE "ProductVersion", "0.1.0"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x409, 1200
+ END
+END

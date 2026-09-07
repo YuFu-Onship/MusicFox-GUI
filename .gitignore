@@ -1,0 +1,12 @@
+# ---- 运行时产物 / 构建产物（不入库） ----
+/build/
+*.exe
+*.log
+
+# ---- go-musicfox 内核镜像（replace 目标，体积大、随上游镜像） ----
+/musicfox-core/
+
+# ---- 杂项 ----
+/1.26
+.DS_Store
+Thumbs.db
