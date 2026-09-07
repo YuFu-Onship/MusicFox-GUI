@@ -5,7 +5,7 @@
 <h1 align="center">MusicFox GUI</h1>
 
 <p align="center">
-  网易云音乐风格的桌面播放器界面 —— 基于 <a href="https://github.com/go-musicfox/go-musicfox">go-musicfox</a> 的播放内核，使用 <b>Go + Wails</b> 编写
+  简洁轻量的桌面播放器界面 —— 基于 <a href="https://github.com/go-musicfox/go-musicfox">go-musicfox</a> 的播放内核，使用 <b>Go + Wails</b> 编写
 </p>
 
 <p align="center">
