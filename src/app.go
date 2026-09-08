@@ -1155,11 +1155,25 @@ func (a *App) PlaySong(songID int64) (PlaySongResult, error) {
 	})
 	slog.Info("start play", "song", song.Name, "id", songID, "type", musicType)
 
-	// 等待内核真正进入 Playing（最多 10s）；内核级失败会转为 Stopped，由前端自动续播接管
-	deadline := time.Now().Add(10 * time.Second)
+	// 等待内核真正进入 Playing（最多 10s）。
+	// 内核接管本次播放时会先进入 Paused；随后若转为 Stopped 且当前曲目
+	// 确为本次请求的歌曲，即内核级失败（源失效/解码失败），立即返回 Skip
+	// 由前端自动切换下一首，不再占住 playMu 干等 10s 拖慢后续播放
+	startedAt := time.Now()
+	deadline := startedAt.Add(10 * time.Second)
+	seenActive := false
 	for time.Now().Before(deadline) {
-		if a.player.State() == types.Playing {
+		switch a.player.State() {
+		case types.Playing:
 			return PlaySongResult{OK: true}, nil
+		case types.Paused:
+			seenActive = true
+		case types.Stopped:
+			// seenActive：内核已接管本次切换后失败；
+			// 1s 宽限：覆盖接管前上一曲残留的 Stopped（同曲连播场景），避免误判
+			if a.player.CurMusic().Id == songID && (seenActive || time.Since(startedAt) >= time.Second) {
+				return PlaySongResult{Skip: true, Message: "歌曲播放失败，已自动跳过"}, nil
+			}
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
