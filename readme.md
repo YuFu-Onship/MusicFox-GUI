@@ -1,5 +1,5 @@
 <p align="center">
-<img width="236" height="247" alt="Untitled" src="https://github.com/user-attachments/assets/369a689a-1ead-4580-81fa-7fe04806327c" />
+<img width="256" height="256" alt="Untitled (1)" src="https://github.com/user-attachments/assets/6e36e6f8-bcca-4cfb-8cdd-fed6dc49b884" />
 </p>
 
 <h1 align="center">MusicFox GUI</h1>
