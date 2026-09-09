@@ -15,6 +15,7 @@ const els = {
   settingsPanel: $("settingsPanel"),
   setQualityOpts: $("setQualityOpts"),
   setBufferOpts: $("setBufferOpts"),
+  setNormOpts: $("setNormOpts"),
 
   /* 主视图 */
   searchBar: $("searchBar"),
@@ -88,6 +89,7 @@ const els = {
   progressTip: $("progressTip"),
   volumeBtn: $("volumeBtn"),
   volumeIcon: $("volumeIcon"),
+  volumeNum: $("volumeNum"),
   volumeTrack: $("volumeTrack"),
   volumeFill: $("volumeFill"),
   queueWrap: $("queueWrap"),
@@ -864,6 +866,7 @@ function persistLocal() {
     favorites,
     bufferMB: bufMB,
     quality: qualitySel,
+    volumeNorm,
   };
   if (go) {
     try {
@@ -886,6 +889,7 @@ const BUFFER_CHOICES = [256, 512, 1024, 2048];
 
 let qualitySel = "higher"; // 音质 key（standard/higher/exhigh）
 let bufMB = 512; // 缓冲区大小上限（MB）
+let volumeNorm = false; // 音量归一化：输出限制在安全区间
 
 function paintSettingsOpts() {
   if (!els.setQualityOpts) return;
@@ -895,6 +899,16 @@ function paintSettingsOpts() {
   els.setBufferOpts
     .querySelectorAll(".opt-pill")
     .forEach((b) => b.classList.toggle("active", Number(b.dataset.mb) === bufMB));
+  if (els.setNormOpts) {
+    els.setNormOpts
+      .querySelectorAll(".opt-pill")
+      .forEach((b) =>
+        b.classList.toggle(
+          "active",
+          b.dataset.norm === (volumeNorm ? "on" : "off"),
+        ),
+      );
+  }
 }
 
 function applyQuality(q) {
@@ -923,6 +937,30 @@ els.setQualityOpts.addEventListener("click", (e) => {
 els.setBufferOpts.addEventListener("click", (e) => {
   const b = e.target.closest(".opt-pill[data-mb]");
   if (b) applyBuffer(b.dataset.mb);
+});
+
+function applyVolumeNorm(on) {
+  volumeNorm = !!on;
+  paintSettingsOpts();
+  persistLocal();
+  if (go) {
+    try {
+      go.SetVolumeNorm(volumeNorm);
+    } catch (_) {}
+  }
+  toast(
+    volumeNorm
+      ? "音量归一化已开启：输出音量限制在安全区间"
+      : "音量归一化已关闭",
+  );
+}
+
+els.setNormOpts.addEventListener("click", (e) => {
+  const b = e.target.closest(".opt-pill[data-norm]");
+  if (!b) return;
+  const on = b.dataset.norm === "on";
+  if (on === volumeNorm) return;
+  applyVolumeNorm(on);
 });
 
 /* ================= 会话续播（记录最近一次播放的列表/歌单队列） ================= */
@@ -1102,6 +1140,8 @@ async function playSong(id, name, force) {
     ? (s.artists || "") + " · " + (s.album || "")
     : "";
   curDuration = s ? s.duration || 0 : 0;
+  curPos = 0;
+  seekGuardUntil = 0;
   els.progressHandle.style.display = "";
   progressCtl.setRatio(0);
   applyCover(curSongPic);
@@ -1541,6 +1581,8 @@ function bindRail(rail, fill, handlers) {
 }
 
 let curDuration = 0;
+let curPos = 0; // 最近一次已知的播放进度（秒），键盘 ←→ 调整的基准
+let seekGuardUntil = 0; // 键盘调进度后的保护窗口，期间忽略旧进度回写
 let progressDrag = false;
 
 const progressCtl = bindRail(els.progressTrack, els.progressFill, {
@@ -1580,15 +1622,38 @@ els.progressContainer.addEventListener("pointerup", () => {
 });
 
 let volumeTimer = null;
+let volumeNumTimer = null;
+let volumeCommitTimer = null;
+
+/* 调节音量期间（拖动音量条 / ↑↓ 键 / 静音切换）：
+   图标临时切换为当前音量数值，0.5s 无操作后恢复图标（按钮定宽，宽度不变） */
+function showVolumeNumber(v) {
+  els.volumeNum.textContent = String(
+    Math.round(Math.min(100, Math.max(0, v))),
+  );
+  els.volumeBtn.classList.add("show-num");
+  clearTimeout(volumeNumTimer);
+}
+
+function scheduleVolumeNumHide() {
+  clearTimeout(volumeNumTimer);
+  volumeNumTimer = setTimeout(
+    () => els.volumeBtn.classList.remove("show-num"),
+    500,
+  );
+}
+
 const volumeCtl = bindRail(els.volumeTrack, els.volumeFill, {
   onMove(ratio) {
     const v = Math.round(ratio * 100);
     paintVolume(v);
+    showVolumeNumber(v); // 拖动期间保持数值显示
     clearTimeout(volumeTimer);
     volumeTimer = setTimeout(() => callVolume(v), 120);
   },
   onCommit(ratio) {
     callVolume(Math.round(ratio * 100));
+    scheduleVolumeNumHide(); // 停止拖动 0.5s 后恢复图标
   },
 });
 
@@ -1609,10 +1674,29 @@ async function callVolume(v) {
   }
 }
 
+/* 键盘 ↑↓ 音量 ±5：滑杆/图标/数值立即更新，后端调用 120ms 防抖合并 */
+function nudgeVolume(delta) {
+  const target = Math.round(Math.min(100, Math.max(0, volume + delta)));
+  showVolumeNumber(target);
+  scheduleVolumeNumHide(); // 最后一次按键结束后 0.5s 恢复图标
+  if (target === volume) return;
+  volume = target;
+  volumeCtl.setRatio(target / 100);
+  paintVolume(target);
+  scheduleLocalSave();
+  clearTimeout(volumeCommitTimer);
+  volumeCommitTimer = setTimeout(() => {
+    if (DEMO || !go) return;
+    go.SetVolume(volume).catch(() => {});
+  }, 120);
+}
+
 let lastVolBeforeMute = 60;
 function applyVolumeLocal(v) {
   volumeCtl.setRatio(clamp01(v / 100));
   paintVolume(v);
+  showVolumeNumber(v);
+  scheduleVolumeNumHide();
   callVolume(v);
 }
 
@@ -1634,6 +1718,30 @@ function seekTo(sec) {
   go.Seek(sec).catch((e) =>
     toast(String(e && e.message ? e.message : e), "err"),
   );
+}
+
+/* 键盘 ←→ 进度 ±15s：进度条立即反馈，后端跳转 120ms 防抖合并；
+   跳转后的保护窗口内不回写旧进度，避免进度条抖回。
+   上次会话尚未续播时（resumeReady）调整的是续播起点 */
+let seekCommitTimer = null;
+function nudgeSeek(delta) {
+  if (!hasSongReady() || !curDuration) return;
+  if (els.progressTrack.classList.contains("disabled")) return;
+  const base = resumeReady ? resumeSeekPos : curPos;
+  let target = base + delta;
+  if (target < 0) target = 0;
+  if (target > curDuration) target = curDuration;
+  if (resumeReady) {
+    resumeSeekPos = target;
+  } else {
+    curPos = target;
+    clearTimeout(seekCommitTimer);
+    seekCommitTimer = setTimeout(() => {
+      seekGuardUntil = Date.now() + 900;
+      seekTo(curPos);
+    }, 120);
+  }
+  progressCtl.setRatio(clamp01(target / curDuration));
 }
 
 /* ================= 歌词（窗口化：只渲染当前行 ±7 条，无滚动） ================= */
@@ -1984,6 +2092,8 @@ function applyStatus(st) {
       els.songTitle.textContent = st.song.name;
       els.songArtist.textContent = st.song.artists + " · " + st.song.album;
       curDuration = st.song.duration || 0;
+      curPos = st.position;
+      seekGuardUntil = 0;
       els.progressHandle.style.display = "";
       applyCover(st.song.picUrl);
       markPlayingRow(st.song.id);
@@ -2002,7 +2112,11 @@ function applyStatus(st) {
     }
 
     if (curDuration > 0) {
-      progressCtl.setRatio(clamp01(st.position / curDuration));
+      /* 键盘 ←→ 调进度后的保护窗口内不回写旧进度，避免进度条抖回 */
+      if (Date.now() >= seekGuardUntil) {
+        curPos = st.position;
+        progressCtl.setRatio(clamp01(st.position / curDuration));
+      }
       /* 播放中每 ~3s 记录一次会话（含进度），退出/重启后可续播 */
       if (playing) {
         sessionLivePos = st.position;
@@ -2321,6 +2435,61 @@ window.addEventListener("keydown", (e) => {
   }
   closeDetail();
 });
+
+/* ================= 全局快捷键 =================
+   ↑/↓ 音量 ±5（音量图标暂显数值）、←/→ 进度 ±15s、空格 播放/暂停、
+   [ / ]（含 { / }）上一曲/下一曲；输入框聚焦或按住修饰键时不劫持 */
+window.addEventListener("keydown", (e) => {
+  if (e.ctrlKey || e.altKey || e.metaKey) return;
+  const ae = document.activeElement;
+  if (
+    ae &&
+    (ae.tagName === "INPUT" ||
+      ae.tagName === "TEXTAREA" ||
+      ae.isContentEditable)
+  )
+    return;
+  switch (e.key) {
+    case "ArrowUp":
+      e.preventDefault();
+      nudgeVolume(5);
+      break;
+    case "ArrowDown":
+      e.preventDefault();
+      nudgeVolume(-5);
+      break;
+    case "ArrowLeft":
+      e.preventDefault();
+      nudgeSeek(-15);
+      break;
+    case "ArrowRight":
+      e.preventDefault();
+      nudgeSeek(15);
+      break;
+    case " ":
+    case "Spacebar":
+      /* preventDefault 会抑制焦点按钮的空格激活，避免双重触发 */
+      e.preventDefault();
+      if (e.repeat) return;
+      togglePlay();
+      pressFx(els.playBtn);
+      break;
+    case "[":
+    case "{":
+      e.preventDefault();
+      if (e.repeat) return;
+      pressFx(els.prevBtn);
+      playNeighbor(-1);
+      break;
+    case "]":
+    case "}":
+      e.preventDefault();
+      if (e.repeat) return;
+      pressFx(els.nextBtn);
+      playNeighbor(1);
+      break;
+  }
+});
 els.detailPlayAll.addEventListener("click", () => {
   if (detailLoading || !songPool.length) {
     toast("歌曲还在加载中");
@@ -2500,6 +2669,7 @@ async function tickDemo() {
             bufMB = Number(val.bufferMB);
           if (QUALITY_LABELS[val.quality]) qualitySel = val.quality;
           else qualitySel = "higher";
+          if (typeof val.volumeNorm === "boolean") volumeNorm = val.volumeNorm;
         }
       }
     } catch (_) {}
@@ -2557,6 +2727,7 @@ async function tickDemo() {
     if (ls && BUFFER_CHOICES.indexOf(Number(ls.bufferMB)) >= 0) bufMB = Number(ls.bufferMB);
     if (ls && QUALITY_LABELS[ls.quality]) qualitySel = ls.quality;
     else if (ls) qualitySel = "higher";
+    if (ls && typeof ls.volumeNorm === "boolean") volumeNorm = ls.volumeNorm;
     paintSettingsOpts();
     updateFavCount();
   } catch (_) {}

@@ -66,16 +66,19 @@ type Settings struct {
 	// BufferMB 歌曲缓冲区大小上限（MB，256~2048），作用于 exe 旁的 musicfox_gui_buffer 目录
 	BufferMB int    `json:"bufferMB"`
 	Quality  string `json:"quality"` // 音质：standard/higher/exhigh/lossless/hires/jyeffect/sky/jymaster，空=跟随内核配置
+	// VolumeNorm 音量归一化：开启后实际输出音量被限制在安全区间，防止音量过高或过低
+	VolumeNorm bool `json:"volumeNorm"`
 }
 
 // LocalState 前端读写视图：设置 + 收藏
 // 设置存 setting.json，收藏存 favorites.csv（均在 exe 旁的 musicfox_gui_data 目录）
 type LocalState struct {
-	Theme     string    `json:"theme"` // dark / light
-	Volume    int       `json:"volume"`
-	BufferMB  int       `json:"bufferMB"`
-	Quality   string    `json:"quality"`
-	Favorites []SongDTO `json:"favorites"`
+	Theme      string    `json:"theme"` // dark / light
+	Volume     int       `json:"volume"`
+	BufferMB   int       `json:"bufferMB"`
+	Quality    string    `json:"quality"`
+	VolumeNorm bool      `json:"volumeNorm"`
+	Favorites  []SongDTO `json:"favorites"`
 	// DataDir/BufferDir 仅用于界面提示（实际数据目录，非持久化字段）
 	DataDir   string `json:"dataDir,omitempty"`
 	BufferDir string `json:"bufferDir,omitempty"`
@@ -106,12 +109,23 @@ type App struct {
 
 	smtc *smtcSession // Windows 系统媒体控制栏（SMTC）会话，nil 表示初始化失败/非 Windows
 
-	qualityMu sync.Mutex
-	quality   string // 设置的音质（空=跟随内核配置），有效播放时使用
-	bufferMB  int    // 歌曲缓冲区大小上限（MB）
+	qualityMu  sync.RWMutex
+	quality    string // 设置的音质（空=跟随内核配置），有效播放时使用
+	bufferMB   int    // 歌曲缓冲区大小上限（MB）
+	volumeNorm bool   // 音量归一化：输出音量限制在安全区间（qualityMu 保护）
+
+	curVolume atomic.Int32 // UI 音量读数 0~100（引擎收到的是归一化换算后的值）
 
 	bufferStop chan struct{} // 缓冲目录清理协程的停止信号
 }
+
+// 音量归一化输出区间：开启后把 UI 音量 0~100 映射进该区间（0 仍为真静音），
+// 防止音量过高损伤听力或过低难以听见。beep 引擎音量是指数增益刻度
+// （100=0dB、75≈-6dB、20≈-24dB），取 [20, 75] 兼顾保护与可用性
+const (
+	normVolumeFloor = 20
+	normVolumeCeil  = 75
+)
 
 // 常量目录名：全部运行时文件都收敛在 exe 旁边的这两个目录里
 const (
@@ -362,7 +376,7 @@ func migrateLegacyState() {
 		return
 	}
 	if setErr != nil {
-		_ = Settings{Theme: old.Theme, Volume: old.Volume, BufferMB: old.BufferMB, Quality: old.Quality}.save()
+		_ = Settings{Theme: old.Theme, Volume: old.Volume, BufferMB: old.BufferMB, Quality: old.Quality, VolumeNorm: old.VolumeNorm}.save()
 	}
 	if favErr != nil && len(old.Favorites) > 0 {
 		_ = writeFavoritesCSV(old.Favorites)
@@ -533,13 +547,14 @@ func (a *App) LoadState() (LocalState, error) {
 		qualityUI = string(service.Higher)
 	}
 	return LocalState{
-		Theme:     st.Theme,
-		Volume:    st.Volume,
-		BufferMB:  st.BufferMB,
-		Quality:   qualityUI,
-		Favorites: favs,
-		DataDir:   guiDataDir(),
-		BufferDir: bufferDir(),
+		Theme:      st.Theme,
+		Volume:     st.Volume,
+		BufferMB:   st.BufferMB,
+		Quality:    qualityUI,
+		VolumeNorm: st.VolumeNorm,
+		Favorites:  favs,
+		DataDir:    guiDataDir(),
+		BufferDir:  bufferDir(),
 	}, nil
 }
 
@@ -559,8 +574,9 @@ func (a *App) SaveState(st LocalState) error {
 	}
 	a.qualityMu.Unlock()
 	a.setQualityBuffer(savedQ, savedMB)
+	a.setVolumeNorm(st.VolumeNorm)
 
-	if err := (Settings{Theme: st.Theme, Volume: st.Volume, BufferMB: savedMB, Quality: savedQ}).save(); err != nil {
+	if err := (Settings{Theme: st.Theme, Volume: st.Volume, BufferMB: savedMB, Quality: savedQ, VolumeNorm: st.VolumeNorm}).save(); err != nil {
 		return err
 	}
 	if err := writeFavoritesCSV(st.Favorites); err != nil {
@@ -593,10 +609,13 @@ func (a *App) setQualityBuffer(q string, mb int) {
 	a.bufferMB = mb
 }
 
-// loadAppliedSettings 启动后把 setting.json 里的音质/缓冲区应用到内存
+// loadAppliedSettings 启动后把 setting.json 里的音质/缓冲区/音量归一化应用到内存
 func (a *App) loadAppliedSettings() {
 	st := loadSettings()
 	a.setQualityBuffer(st.Quality, st.BufferMB)
+	a.qualityMu.Lock()
+	a.volumeNorm = st.VolumeNorm
+	a.qualityMu.Unlock()
 }
 
 // dtoToStructSong 由持久化 DTO 还原可播放歌曲
@@ -620,9 +639,12 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	// beep 引擎读取全局 configs.AppConfig（缓存目录已重定向到 musicfox_gui_buffer）
 	a.player = player.NewBeepPlayer()
-	// 应用持久化的音量（引擎默认满音量，界面读数需要在这里真正生效）
-	if v := loadSettings().Volume; a.player != nil {
-		a.player.SetVolume(v)
+	// 应用持久化的音量（引擎默认满音量，界面读数需要在这里真正生效；
+	// 持久化 0 表示静音退出，必须同样下发）
+	if a.player != nil {
+		a.curVolume.Store(int32(a.player.Volume()))
+		v := loadSettings().Volume
+		a.SetVolume(v)
 		slog.Info("applied saved volume on startup", "volume", v)
 	}
 	slog.Info("beep player started")
@@ -1209,12 +1231,31 @@ func (a *App) Stop() {
 	}
 }
 
-// SetVolume 设置音量 0~100。
+// SetVolume 设置音量 0~100（UI 音量，归一化不影响读数）。
 // beep 引擎的 SetVolume(0) 只会把增益降到 2^-5（仍有微弱声音），
-// 这里沿用 go-musicfox UpVolume/DownVolume 的步进逻辑置位/清除 Silent 标记，实现完全静音
+// 这里沿用 go-musicfox UpVolume/DownVolume 的步进逻辑置位/清除 Silent 标记，实现完全静音。
+// 开启音量归一化时，实际下发到引擎的音量被限制在安全区间
 func (a *App) SetVolume(volume int) {
+	if volume < 0 {
+		volume = 0
+	} else if volume > 100 {
+		volume = 100
+	}
+	a.curVolume.Store(int32(volume))
+	a.applyVolume(volume)
+}
+
+// applyVolume 按当前归一化设置把 UI 音量换算后下发到播放引擎
+func (a *App) applyVolume(volume int) {
 	if !a.playable() {
 		return
+	}
+	a.qualityMu.RLock()
+	norm := a.volumeNorm
+	a.qualityMu.RUnlock()
+	if norm && volume > 0 {
+		// 0 保留为真静音，其余映射进安全区间
+		volume = normVolumeFloor + (normVolumeCeil-normVolumeFloor)*volume/100
 	}
 	if volume <= 0 {
 		a.player.SetVolume(1) // 先离开触底值，DownVolume 才会生效
@@ -1227,30 +1268,47 @@ func (a *App) SetVolume(volume int) {
 	a.player.SetVolume(volume)
 }
 
-// VolumeUp 音量 +5，返回新音量
+// setVolumeNorm 更新音量归一化开关，并按新映射立即重新下发当前音量
+func (a *App) setVolumeNorm(on bool) {
+	a.qualityMu.Lock()
+	a.volumeNorm = on
+	a.qualityMu.Unlock()
+	a.applyVolume(int(a.curVolume.Load()))
+}
+
+// SetVolumeNorm 开关音量归一化（前端设置页）
+func (a *App) SetVolumeNorm(on bool) {
+	a.setVolumeNorm(on)
+}
+
+// VolumeUp 音量 +5，返回 UI 音量
 func (a *App) VolumeUp() int {
-	if !a.playable() {
-		return 0
-	}
-	a.SetVolume(a.player.Volume() + 5)
-	return a.player.Volume()
+	return a.stepVolume(5)
 }
 
-// VolumeDown 音量 -5，返回新音量
+// VolumeDown 音量 -5，返回 UI 音量
 func (a *App) VolumeDown() int {
-	if !a.playable() {
-		return 0
-	}
-	a.SetVolume(a.player.Volume() - 5)
-	return a.player.Volume()
+	return a.stepVolume(-5)
 }
 
-// Volume 当前音量
-func (a *App) Volume() int {
+// stepVolume 以 UI 音量为基准步进（归一化只影响引擎实际输出，不影响读数）
+func (a *App) stepVolume(delta int) int {
 	if !a.playable() {
 		return 0
 	}
-	return a.player.Volume()
+	v := int(a.curVolume.Load()) + delta
+	if v < 0 {
+		v = 0
+	} else if v > 100 {
+		v = 100
+	}
+	a.SetVolume(v)
+	return v
+}
+
+// Volume 当前 UI 音量（0~100）
+func (a *App) Volume() int {
+	return int(a.curVolume.Load())
 }
 
 // Seek 跳转到指定进度（秒）。beep 引擎目前仅对 go-mp3 解码的 MP3 支持精确跳转
@@ -1305,7 +1363,7 @@ func (a *App) collectStatus() PlayerStatus {
 	}
 
 	status.Position = a.player.PassedTime().Seconds()
-	status.Volume = a.player.Volume()
+	status.Volume = int(a.curVolume.Load()) // UI 音量读数（引擎为归一化换算值）
 
 	cur := a.player.CurMusic()
 	if cur.Id != 0 {

@@ -149,6 +149,33 @@ func TestPlaybackControls(t *testing.T) {
 	a.SetVolume(60)
 	t.Logf("音量调节正常: %d", a.Volume())
 
+	// 音量归一化：UI 读数不变，引擎实际音量被限制在安全区间（0 仍为真静音）
+	a.SetVolumeNorm(true)
+	for _, v := range []int{0, 1, 50, 100} {
+		a.SetVolume(v)
+		if ui := a.Volume(); ui != v {
+			t.Fatalf("归一化开启时 UI 音量读数应保持 %d, got %d", v, ui)
+		}
+		engine := a.player.Volume()
+		if v == 0 {
+			if engine != 0 {
+				t.Fatalf("音量 0 应保持真静音, 引擎音量 %d", engine)
+			}
+			continue
+		}
+		if engine < normVolumeFloor || engine > normVolumeCeil {
+			t.Fatalf("UI=%d 归一化后引擎音量 %d 超出安全区间 [%d, %d]",
+				v, engine, normVolumeFloor, normVolumeCeil)
+		}
+	}
+	a.SetVolume(100)
+	if e := a.player.Volume(); e != normVolumeCeil {
+		t.Fatalf("UI 100 应映射为引擎 %d, got %d", normVolumeCeil, e)
+	}
+	a.SetVolumeNorm(false)
+	a.SetVolume(60)
+	t.Logf("音量归一化验证通过")
+
 	// 进度跳转（暂停状态下 seek 后位置应跳到目标附近）
 	if !a.seekSupported() {
 		t.Log("当前音质不是 go-mp3 的 mp3，跳过 Seek 断言")
@@ -191,5 +218,5 @@ func TestPlaybackControls(t *testing.T) {
 	if a.player.State() != types.Stopped {
 		t.Fatalf("Stop 后状态异常: %v", a.player.State())
 	}
-	t.Log("全流程验证通过: 搜索/播放/暂停/音量/进度/停止")
+	t.Log("全流程验证通过: 搜索/播放/暂停/音量/归一化/进度/停止")
 }
