@@ -6,10 +6,13 @@ require github.com/go-musicfox/go-musicfox v0.0.0
 
 replace github.com/go-musicfox/go-musicfox => ./musicfox-core
 
+replace github.com/ebitengine/oto/v3 => ./third_party/oto-v3
+
 require (
 	github.com/adrg/xdg v0.5.3
 	github.com/go-musicfox/netease-music v1.6.0
 	github.com/go-ole/go-ole v1.3.0
+	github.com/gopxl/beep v1.4.0
 	github.com/juju/persistent-cookiejar v1.0.0
 )
 
@@ -32,7 +35,6 @@ require (
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/gopxl/beep v1.4.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/knadh/koanf/parsers/toml v0.1.0 // indirect
 	github.com/knadh/koanf/providers/file v1.2.0 // indirect

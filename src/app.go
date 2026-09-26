@@ -34,6 +34,12 @@ import (
 	"github.com/go-musicfox/go-musicfox/utils/netease"
 	"github.com/go-musicfox/go-musicfox/utils/slogx"
 	utilsstruct "github.com/go-musicfox/go-musicfox/utils/struct"
+
+	"github.com/gopxl/beep"
+	"github.com/gopxl/beep/flac"
+	"github.com/gopxl/beep/minimp3"
+	"github.com/gopxl/beep/vorbis"
+	"github.com/gopxl/beep/wav"
 )
 
 const defaultConfigToml = "embed/" + types.AppTomlFile
@@ -66,7 +72,7 @@ type Settings struct {
 	// BufferMB 歌曲缓冲区大小上限（MB，256~2048），作用于 exe 旁的 musicfox_gui_buffer 目录
 	BufferMB int    `json:"bufferMB"`
 	Quality  string `json:"quality"` // 音质：standard/higher/exhigh/lossless/hires/jyeffect/sky/jymaster，空=跟随内核配置
-	// VolumeNorm 音量归一化：开启后实际输出音量被限制在安全区间，防止音量过高或过低
+	// VolumeNorm 音量归一化：开播时分析歌曲平均响度，自动调整增益使响度趋近统一水平
 	VolumeNorm bool `json:"volumeNorm"`
 }
 
@@ -110,21 +116,33 @@ type App struct {
 	smtc *smtcSession // Windows 系统媒体控制栏（SMTC）会话，nil 表示初始化失败/非 Windows
 
 	qualityMu  sync.RWMutex
-	quality    string // 设置的音质（空=跟随内核配置），有效播放时使用
-	bufferMB   int    // 歌曲缓冲区大小上限（MB）
-	volumeNorm bool   // 音量归一化：输出音量限制在安全区间（qualityMu 保护）
+	quality    string  // 设置的音质（空=跟随内核配置），有效播放时使用
+	bufferMB   int     // 歌曲缓冲区大小上限（MB）
+	volumeNorm bool    // 音量归一化：按歌曲实际响度调整增益（qualityMu 保护）
+	normGain   float64 // 当前歌曲响度比值（预设响度/实际响度，0=尚未分析完成）
+	normSeq    uint64  // 响度分析归属序号：切歌后作废旧歌曲的分析结果
 
 	curVolume atomic.Int32 // UI 音量读数 0~100（引擎收到的是归一化换算后的值）
 
 	bufferStop chan struct{} // 缓冲目录清理协程的停止信号
 }
 
-// 音量归一化输出区间：开启后把 UI 音量 0~100 映射进该区间（0 仍为真静音），
-// 防止音量过高损伤听力或过低难以听见。beep 引擎音量是指数增益刻度
-// （100=0dB、75≈-6dB、20≈-24dB），取 [20, 75] 兼顾保护与可用性
+// 音量归一化参数：开播后立即分析歌曲缓冲的平均响度（RMS），
+// 与预设响度的比值即为该曲增益：实际输出 = 样本 × 比值 × 音量参数，
+// 从而让响度偏大/偏小的歌曲播出时趋于一致。
+// 预设响度取 0.10（约 -20dBFS，接近主流平台归一化目标），
+// 比值限制在 [0.25, 4]，避免极端母带或静音开头的歌曲被过度调整
 const (
-	normVolumeFloor = 20
-	normVolumeCeil  = 75
+	normTargetRMS   = 0.10
+	normMinRatio    = 0.25
+	normMaxRatio    = 4.0
+)
+
+const (
+	normAnalyzeSeconds = 30.0              // 最多分析歌曲开头 30 秒
+	normMinFramesSec   = 1.0               // 有效样本不足 1 秒时视为分析失败
+	normWaitBytes      = int64(512 << 10)  // 缓冲写出 512KB 后开始分析（边下边播）
+	normWaitTimeout    = 10 * time.Second
 )
 
 // 常量目录名：全部运行时文件都收敛在 exe 旁边的这两个目录里
@@ -1176,6 +1194,9 @@ func (a *App) PlaySong(songID int64) (PlaySongResult, error) {
 		Type: st,
 	})
 	slog.Info("start play", "song", song.Name, "id", songID, "type", musicType)
+	if a.volumeNormOn() {
+		a.startVolumeNorm(st)
+	}
 
 	// 等待内核真正进入 Playing（最多 10s）。
 	// 内核接管本次播放时会先进入 Paused；随后若转为 Stopped 且当前曲目
@@ -1245,17 +1266,33 @@ func (a *App) SetVolume(volume int) {
 	a.applyVolume(volume)
 }
 
+// normEngineVolume 按响度增益把 UI 音量换算成引擎音量刻度。
+// beep 音量是指数增益刻度（SetVolume(v) 对应增益 2^(v/20-5)），
+// 给样本乘增益 gain 等价于刻度上加 20*log2(gain)，因此
+// 引擎音量 = UI 音量 + 20*log2(gain)，UI 音量 0 仍为真静音
+func normEngineVolume(ui int, gain float64) int {
+	if ui <= 0 || gain <= 0 || gain == 1 {
+		return ui
+	}
+	v := int(math.Round(float64(ui) + 20*math.Log2(gain)))
+	if v < 1 {
+		v = 1
+	} else if v > 100 {
+		v = 100
+	}
+	return v
+}
+
 // applyVolume 按当前归一化设置把 UI 音量换算后下发到播放引擎
 func (a *App) applyVolume(volume int) {
 	if !a.playable() {
 		return
 	}
 	a.qualityMu.RLock()
-	norm := a.volumeNorm
+	norm, gain := a.volumeNorm, a.normGain
 	a.qualityMu.RUnlock()
-	if norm && volume > 0 {
-		// 0 保留为真静音，其余映射进安全区间
-		volume = normVolumeFloor + (normVolumeCeil-normVolumeFloor)*volume/100
+	if norm {
+		volume = normEngineVolume(volume, gain)
 	}
 	if volume <= 0 {
 		a.player.SetVolume(1) // 先离开触底值，DownVolume 才会生效
@@ -1268,11 +1305,140 @@ func (a *App) applyVolume(volume int) {
 	a.player.SetVolume(volume)
 }
 
-// setVolumeNorm 更新音量归一化开关，并按新映射立即重新下发当前音量
+// volumeNormOn 归一化开关（并发安全）
+func (a *App) volumeNormOn() bool {
+	a.qualityMu.RLock()
+	defer a.qualityMu.RUnlock()
+	return a.volumeNorm
+}
+
+// startVolumeNorm 对歌曲开始响度分析：等内核把播放缓冲写出足够字节后解码，
+// 计算平均 RMS 得到与预设响度的比值并立即下发到引擎（UI 读数不变）。
+// 分析失败只影响本曲增益（按 1 处理），不影响播放
+func (a *App) startVolumeNorm(songType player.SongType) {
+	a.qualityMu.Lock()
+	a.normSeq++
+	seq := a.normSeq
+	on := a.volumeNorm
+	a.normGain = 0
+	a.qualityMu.Unlock()
+	a.applyVolume(int(a.curVolume.Load())) // 新歌先按未归一化音量播出，分析完成后自动校正
+	if !on {
+		return
+	}
+	go func() {
+		gain, err := analyzeNormGain(songType)
+		if err != nil {
+			slog.Warn("音量归一化分析失败", "err", err)
+			return
+		}
+		a.qualityMu.Lock()
+		if seq != a.normSeq || !a.volumeNorm {
+			a.qualityMu.Unlock()
+			return
+		}
+		a.normGain = gain
+		a.qualityMu.Unlock()
+		a.applyVolume(int(a.curVolume.Load()))
+		slog.Info("音量归一化完成", "gain", gain)
+	}()
+}
+
+// waitCacheFile 等内核把播放缓冲写到 minBytes 后打开它（文件在流式下载中持续增长）
+func waitCacheFile(path string, minBytes int64, timeout time.Duration) (*os.File, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		if fi, err := os.Stat(path); err == nil && fi.Size() >= minBytes {
+			return os.Open(path)
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return os.Open(path)
+}
+
+// analyzeNormGain 从内核播放缓冲文件（beep_playing）解码样本，
+// 计算平均响度（RMS）并返回与预设响度的比值
+func analyzeNormGain(songType player.SongType) (float64, error) {
+	path := filepath.Join(mfoxapp.RuntimeDir(), "beep_playing")
+	f, err := waitCacheFile(path, normWaitBytes, normWaitTimeout)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	var (
+		streamer beep.StreamSeekCloser
+		format   beep.Format
+	)
+	switch songType {
+	case player.Mp3:
+		streamer, format, err = minimp3.Decode(f)
+	case player.Wav:
+		streamer, format, err = wav.Decode(f)
+	case player.Ogg:
+		streamer, format, err = vorbis.Decode(f)
+	case player.Flac:
+		streamer, format, err = flac.Decode(f)
+	default:
+		err = fmt.Errorf("不支持的音频格式 %d", songType)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("解码失败: %w", err)
+	}
+	defer streamer.Close()
+
+	sampleRate := float64(format.SampleRate)
+	if sampleRate <= 0 {
+		return 0, errors.New("无效采样率")
+	}
+	maxFrames := normAnalyzeSeconds * sampleRate
+	chunk := make([][2]float64, 1024)
+	var sumSq, frames float64
+	for frames < maxFrames {
+		n, ok := streamer.Stream(chunk)
+		for i := 0; i < n; i++ {
+			sumSq += (chunk[i][0]*chunk[i][0] + chunk[i][1]*chunk[i][1]) / 2
+		}
+		frames += float64(n)
+		if n < len(chunk) || !ok {
+			break
+		}
+	}
+	if frames < normMinFramesSec*sampleRate {
+		return 0, fmt.Errorf("有效样本不足: %.1fs", frames/sampleRate)
+	}
+	rms := math.Sqrt(sumSq / frames)
+	if rms <= 0 {
+		return 0, errors.New("缓冲样本为纯静音")
+	}
+	gain := normTargetRMS / rms
+	if gain < normMinRatio {
+		gain = normMinRatio
+	} else if gain > normMaxRatio {
+		gain = normMaxRatio
+	}
+	return gain, nil
+}
+
+// setVolumeNorm 更新音量归一化开关：关闭时清掉增益立即还原，
+// 开启时对正在播放的歌曲立即开始响度分析
 func (a *App) setVolumeNorm(on bool) {
 	a.qualityMu.Lock()
 	a.volumeNorm = on
+	if !on {
+		a.normGain = 0
+	}
 	a.qualityMu.Unlock()
+	if on && a.playable() {
+		cur := a.player.CurMusic()
+		if cur.Id != 0 {
+			a.startVolumeNorm(cur.Type)
+			return
+		}
+	}
 	a.applyVolume(int(a.curVolume.Load()))
 }
 

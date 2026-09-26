@@ -777,20 +777,43 @@
                 height: 100%;
                 background-color: var(--color-active);
                 flex-shrink: 0;
+                transition: width 0.4s linear;
+            }
+
+            /* 拖动/键盘调进度时关闭动画，跟手不滞后 */
+            .progress-container.dragging .progress-fill {
+                transition: none;
+            }
+
+            .progress-cursor {
+                position: absolute;
+                top: 50%;
+                left: 0;
+                width: 2px;
+                height: 14px;
+                transform: translate(-50%, -50%);
+                background-color: var(--color-white);
+                display: none;
+                pointer-events: none;
+            }
+
+            .progress-container.scrub .progress-cursor {
+                display: block;
             }
 
             .progress-handle {
-                width: 6px;
+                width: 2px;
                 height: 100%;
                 background-color: var(--color-active);
                 display: none;
                 flex-shrink: 0;
+                margin-left: 4px;
                 transition: height 0.1s ease-out;
             }
 
             .player-bar:hover .progress-handle {
                 display: block;
-                height: 14px;
+                height: 18px;
             }
 
             .progress-tip {
@@ -798,8 +821,6 @@
                 bottom: 100%;
                 margin-bottom: 8px;
                 transform: translateX(-50%);
-                background-color: var(--popup-bg);
-                color: var(--color-title);
                 font-size: 11px;
                 padding: 3px 8px;
                 border-radius: 4px;
@@ -808,11 +829,27 @@
                 white-space: nowrap;
                 font-variant-numeric: tabular-nums;
                 opacity: 0;
-                transition: opacity 0.08s;
+                transition: opacity 0.1s, left 0.4s linear;
+                z-index: 6;
             }
 
-            .progress-container:hover .progress-tip {
-                opacity: 1;
+            /* 当前进度提示：红底白字，随播放线性滑动 */
+            .progress-tip.tip-current {
+                background-color: var(--color-active);
+                color: var(--color-white);
+            }
+
+            /* 目标进度提示：灰底灰字，跟随指针（不位移动画）；叠加时在上层 */
+            .progress-tip.tip-target {
+                background-color: #2b2b2b;
+                color: #a0a0a0;
+                transition: opacity 0.1s;
+                z-index: 7;
+            }
+
+            /* 拖动/键盘调进度时提示框跟手，不做位移动画 */
+            .progress-container.dragging .progress-tip {
+                transition: opacity 0.1s;
             }
 
             .controls-container {
@@ -2406,8 +2443,9 @@
                                 <button class="opt-pill" type="button" data-norm="on">开启</button>
                             </div>
                             <div class="setting-desc">
-                                开启后实际输出音量将限制在约 20%~75% 的安全区间（音量 0 仍为静音），
-                                滑杆与快捷键读数不变，防止音量过高或过低。
+                                开启后每首歌开播时会分析音频的平均响度，自动计算增益，
+                                让响度过大或过小的歌曲播放时趋于一致（音量 0 仍为静音）。
+                                音量滑杆与快捷键读数不变。
                             </div>
                         </div>
                         <div class="setting-section">
@@ -2455,8 +2493,10 @@
                 <div class="progress-track" id="progressTrack">
                     <div class="progress-fill" id="progressFill"></div>
                     <div class="progress-handle" id="progressHandle"></div>
+                    <div class="progress-cursor" id="progressCursor"></div>
                 </div>
-                <div class="progress-tip" id="progressTip"></div>
+                <div class="progress-tip tip-current" id="progressTip"></div>
+                <div class="progress-tip tip-target" id="progressTipTarget"></div>
             </div>
 
             <div class="controls-container">

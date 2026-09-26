@@ -149,28 +149,31 @@ func TestPlaybackControls(t *testing.T) {
 	a.SetVolume(60)
 	t.Logf("音量调节正常: %d", a.Volume())
 
-	// 音量归一化：UI 读数不变，引擎实际音量被限制在安全区间（0 仍为真静音）
+	// 音量归一化：UI 读数不变；引擎音量 = UI + 20*log2(响度比值)（0 仍为真静音）
 	a.SetVolumeNorm(true)
+	var gain float64
+	deadline = time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		a.qualityMu.RLock()
+		gain = a.normGain
+		a.qualityMu.RUnlock()
+		if gain > 0 {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if gain <= 0 {
+		t.Fatal("等待响度分析超时，归一化增益未生成")
+	}
+	t.Logf("响度分析完成，增益比值 %.2f", gain)
 	for _, v := range []int{0, 1, 50, 100} {
 		a.SetVolume(v)
 		if ui := a.Volume(); ui != v {
 			t.Fatalf("归一化开启时 UI 音量读数应保持 %d, got %d", v, ui)
 		}
-		engine := a.player.Volume()
-		if v == 0 {
-			if engine != 0 {
-				t.Fatalf("音量 0 应保持真静音, 引擎音量 %d", engine)
-			}
-			continue
+		if engine := a.player.Volume(); engine != normEngineVolume(v, gain) {
+			t.Fatalf("UI=%d 引擎音量应 %d, got %d", v, normEngineVolume(v, gain), engine)
 		}
-		if engine < normVolumeFloor || engine > normVolumeCeil {
-			t.Fatalf("UI=%d 归一化后引擎音量 %d 超出安全区间 [%d, %d]",
-				v, engine, normVolumeFloor, normVolumeCeil)
-		}
-	}
-	a.SetVolume(100)
-	if e := a.player.Volume(); e != normVolumeCeil {
-		t.Fatalf("UI 100 应映射为引擎 %d, got %d", normVolumeCeil, e)
 	}
 	a.SetVolumeNorm(false)
 	a.SetVolume(60)
@@ -219,4 +222,28 @@ func TestPlaybackControls(t *testing.T) {
 		t.Fatalf("Stop 后状态异常: %v", a.player.State())
 	}
 	t.Log("全流程验证通过: 搜索/播放/暂停/音量/归一化/进度/停止")
+}
+
+// TestNormEngineVolume 验证响度增益到引擎音量刻度的换算：
+// 引擎音量 = UI 音量 + 20*log2(gain)，并校验 0 静音与边界钳制
+func TestNormEngineVolume(t *testing.T) {
+	cases := []struct {
+		ui   int
+		gain float64
+		want int
+	}{
+		{0, 2, 0},           // UI 0 永远真静音
+		{50, 1, 50},         // 增益 1 不变
+		{50, 2, 70},         // +6dB → +20 刻度
+		{50, 0.5, 30},       // -6dB → -20 刻度
+		{100, 4, 100},       // +12dB 顶到 100
+		{1, 0.25, 1},        // -12dB 钳到 1（保持非零增益）
+		{100, 0.25, 60},     // -12dB
+		{50, 0, 50},         // 未分析（gain<=0）不调整
+	}
+	for _, c := range cases {
+		if got := normEngineVolume(c.ui, c.gain); got != c.want {
+			t.Fatalf("normEngineVolume(%d, %g) = %d, want %d", c.ui, c.gain, got, c.want)
+		}
+	}
 }

@@ -87,6 +87,8 @@ const els = {
   progressFill: $("progressFill"),
   progressHandle: $("progressHandle"),
   progressTip: $("progressTip"),
+  progressTipTarget: $("progressTipTarget"),
+  progressCursor: $("progressCursor"),
   volumeBtn: $("volumeBtn"),
   volumeIcon: $("volumeIcon"),
   volumeNum: $("volumeNum"),
@@ -889,7 +891,7 @@ const BUFFER_CHOICES = [256, 512, 1024, 2048];
 
 let qualitySel = "higher"; // 音质 key（standard/higher/exhigh）
 let bufMB = 512; // 缓冲区大小上限（MB）
-let volumeNorm = false; // 音量归一化：输出限制在安全区间
+let volumeNorm = false; // 音量归一化：按歌曲实际响度自动调整增益
 
 function paintSettingsOpts() {
   if (!els.setQualityOpts) return;
@@ -950,7 +952,7 @@ function applyVolumeNorm(on) {
   }
   toast(
     volumeNorm
-      ? "音量归一化已开启：输出音量限制在安全区间"
+      ? "音量归一化已开启：按歌曲实际响度自动调整增益"
       : "音量归一化已关闭",
   );
 }
@@ -1585,40 +1587,76 @@ let curPos = 0; // 最近一次已知的播放进度（秒），键盘 ←→ �
 let seekGuardUntil = 0; // 键盘调进度后的保护窗口，期间忽略旧进度回写
 let progressDrag = false;
 
+let barHover = false; // 悬浮底部控制栏：红底白字提示显示当前进度
+let scrubHover = false; // 悬浮进度条：白色细线 + 灰底提示显示目标位置
+
 const progressCtl = bindRail(els.progressTrack, els.progressFill, {
   onMove(ratio, e) {
     progressDrag = true;
-    if (curDuration > 0) tipAt(e, ratio);
+    els.progressContainer.classList.add("dragging");
+    if (curDuration > 0) tipScrub(ratio);
   },
   onCommit(ratio) {
-    setTimeout(() => (progressDrag = false), 60);
+    setTimeout(() => {
+      progressDrag = false;
+      els.progressContainer.classList.remove("dragging");
+    }, 60);
     if (curDuration > 0) seekTo(ratio * curDuration);
   },
 });
 
-function tipAt(e, ratio) {
-  const r = els.playerBar.getBoundingClientRect();
-  const dur = curDuration;
-  const text = `${fmtTime((ratio || 0) * dur)} / ${fmtTime(dur)}`;
-  els.progressTip.textContent = text;
-  const left = clamp01((e.clientX - r.left) / r.width) * r.width;
-  els.progressTip.style.left = `${left}px`;
+/* 红底白字提示：定位到滑块处显示当前进度（left 随播放线性滑动） */
+function tipAtCurrent() {
+  if (!barHover || curDuration <= 0) return;
+  const rect = els.progressTrack.getBoundingClientRect();
+  const ratio = clamp01(curPos / curDuration);
+  els.progressTip.textContent = `${fmtTime(curPos)} / ${fmtTime(curDuration)}`;
+  els.progressTip.style.left = `${ratio * rect.width}px`;
+  els.progressTip.style.opacity = "1";
 }
 
+/* 灰底提示 + 白色细线：跟随指针显示目标进度（跟手不滞后），叠加时灰底在上 */
+function tipScrub(ratio) {
+  const rect = els.progressTrack.getBoundingClientRect();
+  els.progressContainer.classList.add("scrub");
+  els.progressCursor.style.left = `${ratio * rect.width}px`;
+  els.progressTipTarget.textContent = `${fmtTime(ratio * curDuration)} / ${fmtTime(curDuration)}`;
+  els.progressTipTarget.style.left = `${ratio * rect.width}px`;
+  els.progressTipTarget.style.opacity = "1";
+}
+
+/* 结束目标位置预览：移除白线与灰底提示，红底提示回到当前进度 */
+function endScrub() {
+  scrubHover = false;
+  els.progressContainer.classList.remove("scrub");
+  els.progressTipTarget.style.opacity = "0";
+  if (barHover && curDuration > 0) tipAtCurrent();
+  else els.progressTip.style.opacity = "0";
+}
+
+els.playerBar.addEventListener("mouseenter", () => {
+  barHover = true;
+  tipAtCurrent();
+});
+els.playerBar.addEventListener("mouseleave", () => {
+  barHover = false;
+  if (!progressDrag) {
+    els.progressTip.style.opacity = "0";
+    if (!scrubHover) els.progressTipTarget.style.opacity = "0";
+  }
+});
 els.progressContainer.addEventListener("pointermove", (e) => {
   if (els.progressTrack.classList.contains("disabled")) return;
   const rect = els.progressTrack.getBoundingClientRect();
   const ratio = clamp01((e.clientX - rect.left) / rect.width);
-  tipAt(e, ratio);
+  scrubHover = true;
+  tipScrub(ratio);
 });
 els.progressContainer.addEventListener("pointerleave", () => {
-  if (!progressDrag) els.progressTip.style.opacity = "0";
-});
-els.progressContainer.addEventListener("pointerdown", () => {
-  els.progressTip.style.opacity = "1";
-});
-els.progressContainer.addEventListener("pointerup", () => {
-  setTimeout(() => (els.progressTip.style.opacity = "0"), 200);
+  /* 拖动结束后 60ms 才清 progressDrag，期间触发的 leave 需稍等再判定 */
+  setTimeout(() => {
+    if (!progressDrag) endScrub();
+  }, 80);
 });
 
 let volumeTimer = null;
@@ -1742,6 +1780,7 @@ function nudgeSeek(delta) {
     }, 120);
   }
   progressCtl.setRatio(clamp01(target / curDuration));
+  tipAtCurrent();
 }
 
 /* ================= 歌词（窗口化：只渲染当前行 ±7 条，无滚动） ================= */
@@ -2116,6 +2155,7 @@ function applyStatus(st) {
       if (Date.now() >= seekGuardUntil) {
         curPos = st.position;
         progressCtl.setRatio(clamp01(st.position / curDuration));
+        tipAtCurrent();
       }
       /* 播放中每 ~3s 记录一次会话（含进度），退出/重启后可续播 */
       if (playing) {
