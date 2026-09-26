@@ -1047,7 +1047,7 @@ function applySavedSession(sess) {
   els.prevBtn.disabled = queue.length === 0;
   els.nextBtn.disabled = queue.length === 0;
   els.progressHandle.style.display = "";
-  progressCtl.setRatio(
+  setRatioNow(
     curDuration && resumeSeekPos ? clamp01(resumeSeekPos / curDuration) : 0,
   );
   applyCover(cur.picUrl);
@@ -1145,7 +1145,7 @@ async function playSong(id, name, force) {
   curPos = 0;
   seekGuardUntil = 0;
   els.progressHandle.style.display = "";
-  progressCtl.setRatio(0);
+  setRatioNow(0);
   applyCover(curSongPic);
   lyricLines = [];
   activeLrcIdx = -1;
@@ -1593,36 +1593,92 @@ let scrubHover = false; // 悬浮进度条：白色细线 + 灰底提示显示�
 const progressCtl = bindRail(els.progressTrack, els.progressFill, {
   onMove(ratio, e) {
     progressDrag = true;
-    els.progressContainer.classList.add("dragging");
     if (curDuration > 0) tipScrub(ratio);
   },
   onCommit(ratio) {
-    setTimeout(() => {
-      progressDrag = false;
-      els.progressContainer.classList.remove("dragging");
-    }, 60);
+    setTimeout(() => (progressDrag = false), 60);
     if (curDuration > 0) seekTo(ratio * curDuration);
   },
 });
 
-/* 红底白字提示：定位到滑块处显示当前进度（left 随播放线性滑动） */
-function tipAtCurrent() {
-  if (!barHover || curDuration <= 0) return;
-  const rect = els.progressTrack.getBoundingClientRect();
-  const ratio = clamp01(curPos / curDuration);
-  els.progressTip.textContent = `${fmtTime(curPos)} / ${fmtTime(curDuration)}`;
-  els.progressTip.style.left = `${ratio * rect.width}px`;
-  els.progressTip.style.opacity = "1";
+/* 跳变式进度更新（切歌/清空）：本帧关掉过渡直接到位，避免长距离滑行 */
+function setRatioNow(r) {
+  const c = els.progressContainer;
+  c.classList.add("snap");
+  progressCtl.setRatio(r);
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => c.classList.remove("snap")),
+  );
 }
 
-/* 灰底提示 + 白色细线：跟随指针显示目标进度（跟手不滞后），叠加时灰底在上 */
+/* 提示框水平定位：中点对齐目标坐标，但在左右边缘内钳制，避免超出窗口 */
+function placeTip(tip, x) {
+  const rect = els.progressTrack.getBoundingClientRect();
+  const half = tip.offsetWidth / 2;
+  const left = Math.min(Math.max(x, half), rect.width - half);
+  tip.style.left = `${left}px`;
+}
+
+/* 红底白字提示：位置与滑块一致（同为 ratio×轨道宽，CSS 过渡同步滑动）；
+   从隐藏到显示的首次定位不做位移动画，避免从上一次位置滑过来 */
+function tipAtCurrent() {
+  if (!barHover || curDuration <= 0) return;
+  const tip = els.progressTip;
+  tip.textContent = `${fmtTime(curPos)} / ${fmtTime(curDuration)}`;
+  const rect = els.progressTrack.getBoundingClientRect();
+  const x = clamp01(curPos / curDuration) * rect.width;
+  if (tip.style.opacity !== "1") {
+    tip.style.transition = "opacity 0.1s";
+    placeTip(tip, x);
+    tip.style.opacity = "1";
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => (tip.style.transition = "")),
+    );
+  } else {
+    placeTip(tip, x);
+  }
+}
+
+/* 灰底提示 + 白色细线：跟随指针显示目标进度；与红底提示同层不重叠——
+   指针在红块哪一侧就贴哪一侧排布，跨越红块时经 CSS 非线性过渡滑到另一侧 */
 function tipScrub(ratio) {
   const rect = els.progressTrack.getBoundingClientRect();
   els.progressContainer.classList.add("scrub");
   els.progressCursor.style.left = `${ratio * rect.width}px`;
   els.progressTipTarget.textContent = `${fmtTime(ratio * curDuration)} / ${fmtTime(curDuration)}`;
-  els.progressTipTarget.style.left = `${ratio * rect.width}px`;
-  els.progressTipTarget.style.opacity = "1";
+  const gray = els.progressTipTarget;
+  const x = grayTipTarget(ratio * rect.width);
+  if (gray.style.opacity !== "1") {
+    gray.style.transition = "opacity 0.1s";
+    placeTip(gray, x);
+    gray.style.opacity = "1";
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => (gray.style.transition = "")),
+    );
+  } else {
+    placeTip(gray, x);
+  }
+}
+
+/* 灰色提示目标位置：先钳制在轨道内，再避开红色提示的位置——
+   指针在红块左侧则排其左，右侧则排其右；一侧放不下时退到另一侧，
+   始终不与红块重叠、不超出轨道边界 */
+function grayTipTarget(x) {
+  const width = els.progressTrack.getBoundingClientRect().width;
+  const red = els.progressTip;
+  const redX = parseFloat(red.style.left) || 0;
+  const hw = els.progressTipTarget.offsetWidth / 2;
+  const sep = red.offsetWidth / 2 + hw + 4; // 中点最小间距（含 4px 间隙）
+  const leftMax = redX - sep; // 红块左侧能容纳的灰块中点上限
+  const rightMin = redX + sep; // 红块右侧能容纳的灰块中点下限
+  const lo = hw;
+  const hi = width - hw;
+  if (x < redX) {
+    if (leftMax >= lo) return Math.min(Math.max(x, lo), leftMax);
+    return Math.min(rightMin, hi);
+  }
+  if (rightMin <= hi) return Math.max(Math.min(x, hi), rightMin);
+  return Math.max(leftMax, lo);
 }
 
 /* 结束目标位置预览：移除白线与灰底提示，红底提示回到当前进度 */
@@ -1753,6 +1809,8 @@ function seekTo(sec) {
     demoPosition = Math.min(Math.max(0, sec), curDuration);
     return;
   }
+  /* 分段缓冲/后端回传滞后时，保护窗口内不让旧进度把进度条拉回造成卡顿 */
+  seekGuardUntil = Date.now() + 1000;
   go.Seek(sec).catch((e) =>
     toast(String(e && e.message ? e.message : e), "err"),
   );
@@ -2134,6 +2192,7 @@ function applyStatus(st) {
       curPos = st.position;
       seekGuardUntil = 0;
       els.progressHandle.style.display = "";
+      setRatioNow(curDuration > 0 ? clamp01(st.position / curDuration) : 0);
       applyCover(st.song.picUrl);
       markPlayingRow(st.song.id);
       lyricLines = [];
@@ -2177,7 +2236,7 @@ function applyStatus(st) {
     els.songArtist.textContent = "搜索并点击歌曲开始播放";
     curDuration = 0;
     els.progressHandle.style.display = "none";
-    progressCtl.setRatio(0);
+    setRatioNow(0);
     if (lyricsOpen) renderLyricNote("尚未开始播放", false);
   }
 }

@@ -780,8 +780,9 @@
                 transition: width 0.4s linear;
             }
 
-            /* 拖动/键盘调进度时关闭动画，跟手不滞后 */
-            .progress-container.dragging .progress-fill {
+            /* 拖动时滑块跟手不做过渡；切歌/清空时进度跳变直接到位 */
+            .progress-track.dragging .progress-fill,
+            .progress-container.snap .progress-fill {
                 transition: none;
             }
 
@@ -819,12 +820,11 @@
             .progress-tip {
                 position: absolute;
                 bottom: 100%;
-                margin-bottom: 8px;
+                margin-bottom: 12px;
                 transform: translateX(-50%);
                 font-size: 11px;
                 padding: 3px 8px;
                 border-radius: 4px;
-                box-shadow: var(--shadow-pop);
                 pointer-events: none;
                 white-space: nowrap;
                 font-variant-numeric: tabular-nums;
@@ -839,17 +839,14 @@
                 color: var(--color-white);
             }
 
-            /* 目标进度提示：灰底灰字，跟随指针（不位移动画）；叠加时在上层 */
+            /* 目标进度提示：灰底灰字，与红块同层不重叠，
+               跨越红块时经非线性过渡滑到另一侧 */
             .progress-tip.tip-target {
                 background-color: #2b2b2b;
                 color: #a0a0a0;
-                transition: opacity 0.1s;
-                z-index: 7;
-            }
-
-            /* 拖动/键盘调进度时提示框跟手，不做位移动画 */
-            .progress-container.dragging .progress-tip {
-                transition: opacity 0.1s;
+                transition: opacity 0.1s,
+                    left 0.25s cubic-bezier(0.3, 0.7, 0.4, 1);
+                z-index: 6;
             }
 
             .controls-container {
