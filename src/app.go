@@ -74,17 +74,23 @@ type Settings struct {
 	Quality  string `json:"quality"` // 音质：standard/higher/exhigh/lossless/hires/jyeffect/sky/jymaster，空=跟随内核配置
 	// VolumeNorm 音量归一化：开播时分析歌曲平均响度，自动调整增益使响度趋近统一水平
 	VolumeNorm bool `json:"volumeNorm"`
+	// LyricAdaptive 歌词行数自适应：开启后歌词页显示行数随窗口高度调整
+	LyricAdaptive bool `json:"lyricAdaptive"`
+	// Palette 主题配色：classic/windows/teto/koishi
+	Palette string `json:"palette"`
 }
 
 // LocalState 前端读写视图：设置 + 收藏
 // 设置存 setting.json，收藏存 favorites.csv（均在 exe 旁的 musicfox_gui_data 目录）
 type LocalState struct {
-	Theme      string    `json:"theme"` // dark / light
-	Volume     int       `json:"volume"`
-	BufferMB   int       `json:"bufferMB"`
-	Quality    string    `json:"quality"`
-	VolumeNorm bool      `json:"volumeNorm"`
-	Favorites  []SongDTO `json:"favorites"`
+	Theme         string    `json:"theme"` // dark / light
+	Volume        int       `json:"volume"`
+	BufferMB      int       `json:"bufferMB"`
+	Quality       string    `json:"quality"`
+	VolumeNorm    bool      `json:"volumeNorm"`
+	LyricAdaptive bool      `json:"lyricAdaptive"`
+	Palette       string    `json:"palette"`
+	Favorites     []SongDTO `json:"favorites"`
 	// DataDir/BufferDir 仅用于界面提示（实际数据目录，非持久化字段）
 	DataDir   string `json:"dataDir,omitempty"`
 	BufferDir string `json:"bufferDir,omitempty"`
@@ -122,6 +128,12 @@ type App struct {
 	normGain   float64 // 当前歌曲响度比值（预设响度/实际响度，0=尚未分析完成）
 	normSeq    uint64  // 响度分析归属序号：切歌后作废旧歌曲的分析结果
 
+	normCache   map[int64]float64 // 归一化增益缓存（歌曲ID→增益）：复播同一首时直接复用，避免重复分析导致音量跳变
+	normCacheMu sync.Mutex
+
+	volRampSeq atomic.Int64 // 引擎音量平滑过渡序号：新的直接下发会作废旧过渡
+	engineVol  atomic.Int32 // 最近一次下发的引擎音量刻度（平滑过渡的起点）
+
 	curVolume atomic.Int32 // UI 音量读数 0~100（引擎收到的是归一化换算后的值）
 
 	bufferStop chan struct{} // 缓冲目录清理协程的停止信号
@@ -133,16 +145,21 @@ type App struct {
 // 预设响度取 0.10（约 -20dBFS，接近主流平台归一化目标），
 // 比值限制在 [0.25, 4]，避免极端母带或静音开头的歌曲被过度调整
 const (
-	normTargetRMS   = 0.10
-	normMinRatio    = 0.25
-	normMaxRatio    = 4.0
+	normTargetRMS = 0.10
+	normMinRatio  = 0.25
+	normMaxRatio  = 4.0
 )
 
 const (
-	normAnalyzeSeconds = 30.0              // 最多分析歌曲开头 30 秒
-	normMinFramesSec   = 1.0               // 有效样本不足 1 秒时视为分析失败
-	normWaitBytes      = int64(512 << 10)  // 缓冲写出 512KB 后开始分析（边下边播）
+	normAnalyzeSeconds = 30.0             // 最多分析歌曲开头 30 秒
+	normMinFramesSec   = 3.0              // 有效样本不足 3 秒时视为分析失败（太短的片段算出的增益不可靠，宁可不用）
+	normWaitBytes      = int64(512 << 10) // 缓冲写出 512KB 后开始分析（边下边播）
 	normWaitTimeout    = 10 * time.Second
+)
+
+const (
+	volRampSteps    = 12                    // 引擎音量平滑过渡步数
+	volRampInterval = 90 * time.Millisecond // 每步间隔（总时长约 1s）
 )
 
 // 常量目录名：全部运行时文件都收敛在 exe 旁边的这两个目录里
@@ -175,6 +192,7 @@ func NewApp() *App {
 		favorites:  make(map[int64]structs.Song),
 		session:    make(map[int64]structs.Song),
 		bufferMB:   512,
+		normCache:  make(map[int64]float64),
 		bufferStop: make(chan struct{}),
 	}
 	initStateFiles()
@@ -286,7 +304,17 @@ func favoritesFilePath() string {
 }
 
 func defaultSettings() Settings {
-	return Settings{Theme: "dark", Volume: 60, BufferMB: 512}
+	return Settings{Theme: "dark", Volume: 60, BufferMB: 512, Palette: "teto"}
+}
+
+// normalizePalette 校验主题配色取值，非法值（含旧版 classic）回退到默认 Teto
+func normalizePalette(p string) string {
+	p = strings.ToLower(strings.TrimSpace(p))
+	switch p {
+	case "windows", "koishi":
+		return p
+	}
+	return "teto"
 }
 
 // migrateGuiSideFiles 把旧版写在 exe 同目录的 GUI 状态文件移入 musicfox_gui_data
@@ -394,7 +422,7 @@ func migrateLegacyState() {
 		return
 	}
 	if setErr != nil {
-		_ = Settings{Theme: old.Theme, Volume: old.Volume, BufferMB: old.BufferMB, Quality: old.Quality, VolumeNorm: old.VolumeNorm}.save()
+		_ = Settings{Theme: old.Theme, Volume: old.Volume, BufferMB: old.BufferMB, Quality: old.Quality, VolumeNorm: old.VolumeNorm, LyricAdaptive: old.LyricAdaptive, Palette: normalizePalette(old.Palette)}.save()
 	}
 	if favErr != nil && len(old.Favorites) > 0 {
 		_ = writeFavoritesCSV(old.Favorites)
@@ -424,6 +452,7 @@ func loadSettings() Settings {
 	} else {
 		st.Quality = string(q)
 	}
+	st.Palette = normalizePalette(st.Palette)
 	return st
 }
 
@@ -565,14 +594,16 @@ func (a *App) LoadState() (LocalState, error) {
 		qualityUI = string(service.Higher)
 	}
 	return LocalState{
-		Theme:      st.Theme,
-		Volume:     st.Volume,
-		BufferMB:   st.BufferMB,
-		Quality:    qualityUI,
-		VolumeNorm: st.VolumeNorm,
-		Favorites:  favs,
-		DataDir:    guiDataDir(),
-		BufferDir:  bufferDir(),
+		Theme:         st.Theme,
+		Volume:        st.Volume,
+		BufferMB:      st.BufferMB,
+		Quality:       qualityUI,
+		VolumeNorm:    st.VolumeNorm,
+		LyricAdaptive: st.LyricAdaptive,
+		Palette:       st.Palette,
+		Favorites:     favs,
+		DataDir:       guiDataDir(),
+		BufferDir:     bufferDir(),
 	}, nil
 }
 
@@ -593,8 +624,9 @@ func (a *App) SaveState(st LocalState) error {
 	a.qualityMu.Unlock()
 	a.setQualityBuffer(savedQ, savedMB)
 	a.setVolumeNorm(st.VolumeNorm)
+	savedPalette := normalizePalette(st.Palette)
 
-	if err := (Settings{Theme: st.Theme, Volume: st.Volume, BufferMB: savedMB, Quality: savedQ, VolumeNorm: st.VolumeNorm}).save(); err != nil {
+	if err := (Settings{Theme: st.Theme, Volume: st.Volume, BufferMB: savedMB, Quality: savedQ, VolumeNorm: st.VolumeNorm, LyricAdaptive: st.LyricAdaptive, Palette: savedPalette}).save(); err != nil {
 		return err
 	}
 	if err := writeFavoritesCSV(st.Favorites); err != nil {
@@ -1195,7 +1227,7 @@ func (a *App) PlaySong(songID int64) (PlaySongResult, error) {
 	})
 	slog.Info("start play", "song", song.Name, "id", songID, "type", musicType)
 	if a.volumeNormOn() {
-		a.startVolumeNorm(st)
+		a.startVolumeNorm(songID, st)
 	}
 
 	// 等待内核真正进入 Playing（最多 10s）。
@@ -1283,8 +1315,20 @@ func normEngineVolume(ui int, gain float64) int {
 	return v
 }
 
-// applyVolume 按当前归一化设置把 UI 音量换算后下发到播放引擎
+// applyVolume 按当前归一化设置把 UI 音量换算后立即下发到播放引擎
+// （用户调音量/静音切换均走此路径，需立即反馈）
+// （用户调音量/静音切换均走此路径，需立即反馈）
 func (a *App) applyVolume(volume int) {
+	a.applyVolumeWithRamp(volume, false)
+}
+
+// applyVolumeRamped 同 applyVolume，但引擎音量刻度变化较大时经平滑过渡下发：
+// 归一化增益分析完成或切歌时，避免流式播放中音量突变（忽大忽小）
+func (a *App) applyVolumeRamped(volume int) {
+	a.applyVolumeWithRamp(volume, true)
+}
+
+func (a *App) applyVolumeWithRamp(volume int, ramp bool) {
 	if !a.playable() {
 		return
 	}
@@ -1295,14 +1339,53 @@ func (a *App) applyVolume(volume int) {
 		volume = normEngineVolume(volume, gain)
 	}
 	if volume <= 0 {
+		a.volRampSeq.Add(1) // 作废进行中的过渡
+		a.engineVol.Store(0)
 		a.player.SetVolume(1) // 先离开触底值，DownVolume 才会生效
 		a.player.DownVolume() // 音量触底时置 Silent=true，真正静音
 		a.player.SetVolume(0) // 回到 0 刻度
 		return
 	}
+	target := volume
+	if target < 1 {
+		target = 1
+	} else if target > 100 {
+		target = 100
+	}
+	from := int(a.engineVol.Load())
+	if !ramp || from <= 0 || absInt(target-from) <= 2 {
+		a.volRampSeq.Add(1)
+		a.applyEngineVolume(target)
+		return
+	}
+	// 刻度按指数关系对应响度（每 20 刻度 ≈ 一倍增益），线性插值即线性 dB 滑落
+	seq := a.volRampSeq.Add(1)
+	mySeq := seq
+	go func() {
+		for i := 1; i <= volRampSteps; i++ {
+			if mySeq != a.volRampSeq.Load() {
+				return
+			}
+			v := from + (target-from)*i/volRampSteps
+			a.applyEngineVolume(v)
+			time.Sleep(volRampInterval)
+		}
+	}()
+}
+
+// applyEngineVolume 立即下发引擎音量并维护非静音状态标记
+func (a *App) applyEngineVolume(volume int) {
 	a.player.SetVolume(1) // 从非零小音量出发
 	a.player.UpVolume()   // UpVolume 会清除 Silent 标记
 	a.player.SetVolume(volume)
+	a.engineVol.Store(int32(volume))
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 // volumeNormOn 归一化开关（并发安全）
@@ -1313,21 +1396,28 @@ func (a *App) volumeNormOn() bool {
 }
 
 // startVolumeNorm 对歌曲开始响度分析：等内核把播放缓冲写出足够字节后解码，
-// 计算平均 RMS 得到与预设响度的比值并立即下发到引擎（UI 读数不变）。
+// 计算平均 RMS 得到与预设响度的比值并平滑下发到引擎（UI 读数不变）。
+// 同一歌曲的增益会被缓存，复播时直接复用，不再重复分析造成音量跳变。
 // 分析失败只影响本曲增益（按 1 处理），不影响播放
-func (a *App) startVolumeNorm(songType player.SongType) {
+func (a *App) startVolumeNorm(songID int64, songType player.SongType) {
 	a.qualityMu.Lock()
 	a.normSeq++
 	seq := a.normSeq
 	on := a.volumeNorm
 	a.normGain = 0
+	if on {
+		if g, ok := a.cachedNormGain(songID); ok {
+			a.normGain = g
+		}
+	}
+	gain := a.normGain
 	a.qualityMu.Unlock()
-	a.applyVolume(int(a.curVolume.Load())) // 新歌先按未归一化音量播出，分析完成后自动校正
-	if !on {
+	a.applyVolumeRamped(int(a.curVolume.Load())) // 按当前增益播出（有缓存则立即生效），分析完成后自动校正
+	if !on || gain > 0 {
 		return
 	}
 	go func() {
-		gain, err := analyzeNormGain(songType)
+		g, err := analyzeNormGain(songType)
 		if err != nil {
 			slog.Warn("音量归一化分析失败", "err", err)
 			return
@@ -1337,11 +1427,30 @@ func (a *App) startVolumeNorm(songType player.SongType) {
 			a.qualityMu.Unlock()
 			return
 		}
-		a.normGain = gain
+		a.normGain = g
 		a.qualityMu.Unlock()
-		a.applyVolume(int(a.curVolume.Load()))
-		slog.Info("音量归一化完成", "gain", gain)
+		a.cacheNormGain(songID, g)
+		a.applyVolumeRamped(int(a.curVolume.Load()))
+		slog.Info("音量归一化完成", "gain", g)
 	}()
+}
+
+// cachedNormGain 读取歌曲的归一化增益缓存
+func (a *App) cachedNormGain(songID int64) (float64, bool) {
+	a.normCacheMu.Lock()
+	defer a.normCacheMu.Unlock()
+	g, ok := a.normCache[songID]
+	return g, ok
+}
+
+// cacheNormGain 记录歌曲的归一化增益（有界，超出后整体重建）
+func (a *App) cacheNormGain(songID int64, gain float64) {
+	a.normCacheMu.Lock()
+	defer a.normCacheMu.Unlock()
+	if len(a.normCache) >= 64 {
+		a.normCache = make(map[int64]float64)
+	}
+	a.normCache[songID] = gain
 }
 
 // waitCacheFile 等内核把播放缓冲写到 minBytes 后打开它（文件在流式下载中持续增长）
@@ -1435,11 +1544,11 @@ func (a *App) setVolumeNorm(on bool) {
 	if on && a.playable() {
 		cur := a.player.CurMusic()
 		if cur.Id != 0 {
-			a.startVolumeNorm(cur.Type)
+			a.startVolumeNorm(cur.Id, cur.Type)
 			return
 		}
 	}
-	a.applyVolume(int(a.curVolume.Load()))
+	a.applyVolumeRamped(int(a.curVolume.Load()))
 }
 
 // SetVolumeNorm 开关音量归一化（前端设置页）

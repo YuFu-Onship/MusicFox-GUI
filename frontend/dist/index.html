@@ -6,21 +6,23 @@
         <title>MusicFox GUI</title>
         <style>
             :root {
-                --bg-app: #1e1e20;
-                --bg-panel: #18181a;
-                --bg-inactive: #2b2b2e;
-                --bg-inactive-hover: #3a3a3e;
-                --bg-cover: #3a3a3e;
-                --bg-track: #3a3a3e;
-                --color-inactive: #a0a0a5;
-                --color-active: #c82947;
+                /* 默认配色 = Teto（三级配色，取自 YamiPDF style_palette.go）
+                   Bg_1=app 背景、Bg_2=次级面板/控件、Bg_3=强调色，Fg 同级对应 */
+                --bg-app: #202020;
+                --bg-panel: #1b1b1b;
+                --bg-inactive: #3c3737;
+                --bg-inactive-hover: #4a4444;
+                --bg-cover: #474141;
+                --bg-track: #474141;
+                --color-inactive: #f0c8d2;
+                --color-active: #be1e3c;
                 --color-white: #ffffff;
-                --color-title: #ffffff;
-                --color-secondary: #d1d1d6;
-                --color-line-hover-bg: #242428;
-                --popup-bg: #232327;
+                --color-title: #ffd2dc;
+                --color-secondary: #ffe3ea;
+                --color-line-hover-bg: #2e2b2b;
+                --popup-bg: #2a2626;
                 --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.45);
-                --scroll-thumb: #3a3a3e;
+                --scroll-thumb: #4a4444;
                 --win-hover: rgba(255, 255, 255, 0.12);
                 --ripple: rgba(255, 255, 255, 0.35);
             }
@@ -43,6 +45,74 @@
                 --scroll-thumb: #c6c6cc;
                 --win-hover: rgba(0, 0, 0, 0.08);
                 --ripple: rgba(0, 0, 0, 0.16);
+            }
+
+            /* ================= 主题配色（三级配色，取自 YamiPDF style_palette.go）
+               基础变量即 Teto；此处仅覆盖其余配色，明暗主题分别适配 ================= */
+            /* Windows 蓝 */
+            html[data-palette="windows"] {
+                --bg-app: #202020;
+                --bg-panel: #1b1b1b;
+                --bg-inactive: #2d2d2d;
+                --bg-inactive-hover: #3d3d3d;
+                --bg-cover: #3a3a3a;
+                --bg-track: #3a3a3a;
+                --color-inactive: #9e9e9e;
+                --color-active: #0078d4;
+                --color-title: #ffffff;
+                --color-secondary: #d1d1d1;
+                --color-line-hover-bg: #262626;
+                --popup-bg: #252525;
+                --scroll-thumb: #3d3d3d;
+            }
+
+            html[data-palette="windows"][data-theme="light"] {
+                --bg-app: #f3f3f3;
+                --bg-panel: #e9e9ec;
+                --bg-inactive: #e5e5e5;
+                --bg-inactive-hover: #d5d5d8;
+                --bg-cover: #dcdce1;
+                --bg-track: #d0d0d6;
+                --color-inactive: #616161;
+                --color-active: #005a9e;
+                --color-title: #1a1a1a;
+                --color-secondary: #3c3c42;
+                --color-line-hover-bg: #eaecef;
+                --popup-bg: #ffffff;
+                --scroll-thumb: #c6c6cc;
+            }
+
+            /* Koishi 绿 */
+            html[data-palette="koishi"] {
+                --bg-app: #202020;
+                --bg-panel: #1b1b1b;
+                --bg-inactive: #323c37;
+                --bg-inactive-hover: #404a44;
+                --bg-cover: #3e4842;
+                --bg-track: #3e4842;
+                --color-inactive: #bcd7c5;
+                --color-active: #32a082;
+                --color-title: #d2f0dc;
+                --color-secondary: #e0f2e8;
+                --color-line-hover-bg: #282e2b;
+                --popup-bg: #272b29;
+                --scroll-thumb: #404a44;
+            }
+
+            html[data-palette="koishi"][data-theme="light"] {
+                --bg-app: #f3f3f3;
+                --bg-panel: #e9e9ec;
+                --bg-inactive: #faf0be;
+                --bg-inactive-hover: #e8dfae;
+                --bg-cover: #ece2c0;
+                --bg-track: #e0d7a8;
+                --color-inactive: #28463c;
+                --color-active: #46be96;
+                --color-title: #2e3d30;
+                --color-secondary: #3c4a42;
+                --color-line-hover-bg: #eee9cf;
+                --popup-bg: #fffdf2;
+                --scroll-thumb: #cfc69a;
             }
 
             * {
@@ -135,6 +205,13 @@
                 cursor: pointer;
             }
 
+            /* 悬停高亮/退出变灰均带过渡：光标离开后描述条平滑褪回灰色再收起 */
+            .icon-box {
+                transition:
+                    background-color 0.15s,
+                    color 0.15s;
+            }
+
             .spacer {
                 flex: 1;
             }
@@ -215,8 +292,8 @@
             .label {
                 width: 100%;
                 height: 42px;
-                background-color: var(--color-active);
-                color: var(--color-white);
+                background-color: var(--bg-inactive);
+                color: var(--color-inactive);
                 font-size: 16px;
                 font-weight: 600;
                 display: flex;
@@ -226,6 +303,9 @@
                 border-radius: 4px;
                 white-space: nowrap;
                 text-align: center;
+                transition:
+                    background-color 0.15s,
+                    color 0.15s;
             }
 
             /* ---- 主内容 ---- */
@@ -1057,27 +1137,43 @@
                 display: flex;
             }
 
+            /* 音量滑块与进度条同款设计：悬浮加粗轨道、端部竖条手柄、
+               音量调节即时反馈，填充不做宽度过渡 */
             .volume-bar {
                 width: 70px;
                 height: 4px;
-                background-color: var(--bg-track);
+                background-color: var(--bg-inactive);
                 cursor: pointer;
                 position: relative;
                 display: flex;
                 align-items: center;
+                transition: height 0.1s ease-out;
             }
 
             .volume-fill {
                 width: 60%;
                 height: 100%;
                 background-color: var(--color-active);
+                flex-shrink: 0;
             }
 
             .volume-handle {
-                width: 4px;
+                width: 2px;
                 height: 100%;
                 background-color: var(--color-active);
+                display: none;
                 flex-shrink: 0;
+                margin-left: 4px;
+                transition: height 0.1s ease-out;
+            }
+
+            .volume-box:hover .volume-bar {
+                height: 6px;
+            }
+
+            .volume-box:hover .volume-handle {
+                display: block;
+                height: 16px;
             }
 
             /* ---- 播放列表弹层 ---- */
@@ -1283,18 +1379,9 @@
                 border-radius: 2px;
             }
 
-            .progress-handle {
-                border-radius: 999px;
-            }
-
+            .progress-handle,
             .volume-handle {
-                width: 5px;
                 border-radius: 999px;
-                transition: height 0.1s ease-out;
-            }
-
-            .volume-box:hover .volume-handle {
-                height: 12px;
             }
 
             .volume-bar::before {
@@ -2057,6 +2144,16 @@
                 user-select: text;
             }
 
+            /* 配色选项色块 */
+            .opt-pill .swatch {
+                display: inline-block;
+                width: 10px;
+                height: 10px;
+                border-radius: 2px;
+                margin-right: 6px;
+                vertical-align: -1px;
+            }
+
             .setting-options {
                 display: flex;
                 flex-wrap: wrap;
@@ -2423,6 +2520,17 @@
                             </div>
                         </div>
                         <div class="setting-section">
+                            <div class="setting-label">主题配色</div>
+                            <div class="setting-options" id="setPaletteOpts">
+                                <button class="opt-pill" type="button" data-palette="teto"><span class="swatch" style="background:#be1e3c"></span>Teto</button>
+                                <button class="opt-pill" type="button" data-palette="windows"><span class="swatch" style="background:#0078d4"></span>Windows</button>
+                                <button class="opt-pill" type="button" data-palette="koishi"><span class="swatch" style="background:#32a082"></span>Koishi</button>
+                            </div>
+                            <div class="setting-desc">
+                                三级配色方案（背景/控件/强调色），明暗主题下分别适配。
+                            </div>
+                        </div>
+                        <div class="setting-section">
                             <div class="setting-label">歌曲音质</div>
                             <div class="setting-options" id="setQualityOpts">
                                 <button class="opt-pill" type="button" data-q="standard">标准</button>
@@ -2443,6 +2551,17 @@
                                 开启后每首歌开播时会分析音频的平均响度，自动计算增益，
                                 让响度过大或过小的歌曲播放时趋于一致（音量 0 仍为静音）。
                                 音量滑杆与快捷键读数不变。
+                            </div>
+                        </div>
+                        <div class="setting-section">
+                            <div class="setting-label">歌词行数自适应</div>
+                            <div class="setting-options" id="setAdaptiveOpts">
+                                <button class="opt-pill" type="button" data-adaptive="off">关闭</button>
+                                <button class="opt-pill" type="button" data-adaptive="on">开启</button>
+                            </div>
+                            <div class="setting-desc">
+                                开启后歌词页显示的行数随窗口高度自动调整，小窗口不再显示过多歌词；
+                                关闭则固定显示当前行上下各 7 行。
                             </div>
                         </div>
                         <div class="setting-section">

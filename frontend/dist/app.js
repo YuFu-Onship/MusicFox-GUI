@@ -16,6 +16,8 @@ const els = {
   setQualityOpts: $("setQualityOpts"),
   setBufferOpts: $("setBufferOpts"),
   setNormOpts: $("setNormOpts"),
+  setAdaptiveOpts: $("setAdaptiveOpts"),
+  setPaletteOpts: $("setPaletteOpts"),
 
   /* 主视图 */
   searchBar: $("searchBar"),
@@ -258,7 +260,7 @@ function showBrowseIdle() {
   setActiveNav(els.navSearch);
 }
 
-/* 设置页：同级独立视图（保留侧边栏） */
+/* 设置页：同级独立视图（保留侧边栏，入场与其他界面一致走 panelIn） */
 function showSettingsView() {
   if (!els.settingsPanel.classList.contains("hidden")) return;
   detailToken++;
@@ -869,6 +871,8 @@ function persistLocal() {
     bufferMB: bufMB,
     quality: qualitySel,
     volumeNorm,
+    lyricAdaptive,
+    palette: paletteSel,
   };
   if (go) {
     try {
@@ -892,6 +896,23 @@ const BUFFER_CHOICES = [256, 512, 1024, 2048];
 let qualitySel = "higher"; // 音质 key（standard/higher/exhigh）
 let bufMB = 512; // 缓冲区大小上限（MB）
 let volumeNorm = false; // 音量归一化：按歌曲实际响度自动调整增益
+let lyricAdaptive = false; // 歌词行数自适应：开启后显示行数随窗口高度调整
+let paletteSel = "teto"; // 主题配色：teto（默认）/windows/koishi
+
+const PALETTE_LABELS = {
+  teto: "Teto",
+  windows: "Windows",
+  koishi: "Koishi",
+};
+
+function applyPalette(p) {
+  if (!PALETTE_LABELS[p]) p = "teto";
+  paletteSel = p;
+  /* teto 即基础 CSS 变量，无需属性标记 */
+  if (p === "teto") document.documentElement.removeAttribute("data-palette");
+  else document.documentElement.setAttribute("data-palette", p);
+  paintSettingsOpts();
+}
 
 function paintSettingsOpts() {
   if (!els.setQualityOpts) return;
@@ -909,6 +930,23 @@ function paintSettingsOpts() {
           "active",
           b.dataset.norm === (volumeNorm ? "on" : "off"),
         ),
+      );
+  }
+  if (els.setAdaptiveOpts) {
+    els.setAdaptiveOpts
+      .querySelectorAll(".opt-pill")
+      .forEach((b) =>
+        b.classList.toggle(
+          "active",
+          b.dataset.adaptive === (lyricAdaptive ? "on" : "off"),
+        ),
+      );
+  }
+  if (els.setPaletteOpts) {
+    els.setPaletteOpts
+      .querySelectorAll(".opt-pill")
+      .forEach((b) =>
+        b.classList.toggle("active", b.dataset.palette === paletteSel),
       );
   }
 }
@@ -963,6 +1001,37 @@ els.setNormOpts.addEventListener("click", (e) => {
   const on = b.dataset.norm === "on";
   if (on === volumeNorm) return;
   applyVolumeNorm(on);
+});
+
+function applyLyricAdaptive(on) {
+  lyricAdaptive = !!on;
+  paintSettingsOpts();
+  persistLocal();
+  /* 歌词页开着时立即按新行数重排 */
+  if (lyricsOpen && lyricLines.length) applyLyricView(lyricLines, activeLrcIdx);
+  toast(
+    lyricAdaptive
+      ? "歌词行数自适应已开启：显示行数随窗口高度自动调整"
+      : "歌词行数自适应已关闭",
+  );
+}
+
+els.setAdaptiveOpts.addEventListener("click", (e) => {
+  const b = e.target.closest(".opt-pill[data-adaptive]");
+  if (!b) return;
+  const on = b.dataset.adaptive === "on";
+  if (on === lyricAdaptive) return;
+  applyLyricAdaptive(on);
+});
+
+els.setPaletteOpts.addEventListener("click", (e) => {
+  const b = e.target.closest(".opt-pill[data-palette]");
+  if (!b) return;
+  const p = b.dataset.palette;
+  if (p === paletteSel || !PALETTE_LABELS[p]) return;
+  applyPalette(p);
+  persistLocal();
+  toast(`主题配色已切换为「${PALETTE_LABELS[p]}」`);
 });
 
 /* ================= 会话续播（记录最近一次播放的列表/歌单队列） ================= */
@@ -1804,6 +1873,16 @@ els.volumeBtn.addEventListener("click", () => {
   }
 });
 
+/* 悬浮音量区滚轮调节：向上滚 +2、向下滚 -2（复用键盘调节的防抖与数值显示） */
+els.volumeTrack.parentElement.addEventListener(
+  "wheel",
+  (e) => {
+    e.preventDefault();
+    nudgeVolume(e.deltaY < 0 ? 2 : -2);
+  },
+  { passive: false },
+);
+
 function seekTo(sec) {
   if (DEMO) {
     demoPosition = Math.min(Math.max(0, sec), curDuration);
@@ -1841,9 +1920,10 @@ function nudgeSeek(delta) {
   tipAtCurrent();
 }
 
-/* ================= 歌词（窗口化：只渲染当前行 ±7 条，无滚动） ================= */
+/* ================= 歌词（窗口化：只渲染当前行 ±N 条，无滚动） ================= */
 const lyricCache = new Map();
 const LRC_HALF = 7;
+const LRC_LINE_H = 52; // 与 .lyric-line 固定行高一致
 let curSongId = 0;
 let curSongName = "";
 let curSongArtist = "";
@@ -1852,6 +1932,22 @@ let curSongPic = "";
 let lyricLines = [];
 let activeLrcIdx = -1;
 let lyricLoading = false;
+
+/* 歌词显示半窗行数：默认固定 ±7；开启自适应时按歌词页可用高度估算，
+   小窗口自动少显几行，大窗口多显；歌词区与顶部歌名标题、底部进度条
+   各保留至少 50px 空隙（上下对称，最少 ±1，最多 ±12） */
+function lrcHalf() {
+  if (!lyricAdaptive) return LRC_HALF;
+  const h = els.lyricsScroll.clientHeight;
+  if (!h) return LRC_HALF;
+  const header = els.lyricsScroll.querySelector(".song-header");
+  const headerH = header ? header.offsetHeight : 0;
+  const winH = h - headerH;
+  const half = Math.floor(
+    (winH - 2 * 50 - LRC_LINE_H) / (2 * LRC_LINE_H),
+  );
+  return Math.min(12, Math.max(0, half));
+}
 
 function parseLRC(lrc) {
   if (!lrc) return [];
@@ -2002,8 +2098,9 @@ function applyLyricView(lines, idx) {
   /* 同一首歌：仅刷新窗口内歌词行，头部元素原地不动 */
   win.innerHTML = "";
   const show = idx == null || idx < 0 ? 0 : idx;
-  const from = Math.max(0, show - LRC_HALF);
-  const to = Math.min(lines.length - 1, show + LRC_HALF);
+  const half = lrcHalf();
+  const from = Math.max(0, show - half);
+  const to = Math.min(lines.length - 1, show + half);
   for (let i = from; i <= to; i++) {
     const l = lines[i];
     const row = document.createElement("div");
@@ -2769,6 +2866,9 @@ async function tickDemo() {
           if (QUALITY_LABELS[val.quality]) qualitySel = val.quality;
           else qualitySel = "higher";
           if (typeof val.volumeNorm === "boolean") volumeNorm = val.volumeNorm;
+          if (typeof val.lyricAdaptive === "boolean")
+            lyricAdaptive = val.lyricAdaptive;
+          if (typeof val.palette === "string") applyPalette(val.palette);
         }
       }
     } catch (_) {}
@@ -2827,6 +2927,9 @@ async function tickDemo() {
     if (ls && QUALITY_LABELS[ls.quality]) qualitySel = ls.quality;
     else if (ls) qualitySel = "higher";
     if (ls && typeof ls.volumeNorm === "boolean") volumeNorm = ls.volumeNorm;
+    if (ls && typeof ls.lyricAdaptive === "boolean")
+      lyricAdaptive = ls.lyricAdaptive;
+    if (ls && typeof ls.palette === "string") applyPalette(ls.palette);
     paintSettingsOpts();
     updateFavCount();
   } catch (_) {}
@@ -2845,12 +2948,15 @@ window.addEventListener("pagehide", () => {
   if (curSongId && songPool.length) persistSessionNow(sessionLivePos);
 });
 
-/* 窗口缩放时若歌词页开着则重排活动矩形位置 */
+/* 窗口缩放时若歌词页开着则重排活动矩形位置；
+   开启行数自适应时同时按新高度重算显示行数 */
 let resizeLyr = {};
 window.addEventListener("resize", () => {
   if (lyricsOpen) {
     clearTimeout(resizeLyr._t);
     resizeLyr._t = setTimeout(() => {
+      if (lyricAdaptive && lyricLines.length)
+        applyLyricView(lyricLines, activeLrcIdx);
       hideLrcRect();
       const line = lyricLines[activeLrcIdx]?.el;
       if (line && line.isConnected) {
